@@ -218,7 +218,9 @@ $date = (Get-Date -UFormat "%Y-%m-%d")
 
 
 
-Write-Output "Power BI Environment Detail Extract Process Started"
+Write-Log "========================================" -Level INFO
+Write-Log "POWER BI ENVIRONMENT DETAIL EXTRACT PROCESS STARTED" -Level INFO
+Write-Log "========================================" -Level INFO
 
 # Define the Information Extract Excel file path
 $excelFile = "$baseFolderPath\Power BI Environment Detail.xlsx"
@@ -320,16 +322,6 @@ function Show-WorkspacePicker {
     })
     $form.Controls.Add($cancelBtn)
 
-    # Timer (auto-close after 25s)
-    $timer = New-Object System.Windows.Forms.Timer
-    $timer.Interval = 25000
-    $timer.Add_Tick({
-        $timer.Stop()
-        $form.Tag = 'Timeout'
-        $form.Close()
-    })
-    $timer.Start()
-
     [void]$form.ShowDialog()
 
     # Gather selections
@@ -342,20 +334,17 @@ function Show-WorkspacePicker {
         throw "User cancelled workspace selection."
     }
 
-    $timedOut = ($form.Tag -eq 'Timeout')
-
-    # If nothing selected (or you want to keep your previous behavior), default to all
+    # If nothing selected, default to all workspaces
     if ($selectedIds.Count -eq 0) {
         $selectedIds = $Workspaces.id
     }
 
-    # Include My Workspace only if checked… except on timeout, then force include
-    $includeMy = if ($timedOut) { $true } else { $chkMy.Checked }
+    # Include My Workspace based on checkbox
+    $includeMy = $chkMy.Checked
 
     return [pscustomobject]@{
         SelectedWorkspaceIds = $selectedIds
         IncludeMyWorkspace   = $includeMy
-        TimedOut             = $timedOut
     }
 }
 
@@ -544,7 +533,7 @@ $dataflowRefreshHistory = @()
 # Loop through filtered workspaces
 foreach ($workspace in $workspacesInfo) {
 
-Write-Output "Workspace [$($workspace.WorkspaceName)] Report & Model metadata extraction process started."
+Write-Log "Workspace [$($workspace.WorkspaceName)] Report & Model metadata extraction process started." -Level INFO
 
     # Fetch datasets
     $datasetsUrl = "https://api.powerbi.com/v1.0/myorg/groups/$($workspace.WorkspaceId)/datasets"
@@ -970,7 +959,10 @@ $reportsInAppInfo | Export-Excel -Path $excelFile -WorksheetName "AppReports" -A
 
 Write-Host "Export completed. Data is saved to $excelFile"  
 
-Write-Output "Power BI Environment Detail Extract Process Completed. Excel output saved to $excelFile"
+Write-Log "========================================" -Level INFO
+Write-Log "POWER BI ENVIRONMENT DETAIL EXTRACT PROCESS COMPLETED" -Level SUCCESS
+Write-Log "Excel output saved to: $excelFile" -Level INFO
+Write-Log "========================================" -Level INFO
 
 
 
@@ -987,7 +979,9 @@ Write-Output "Power BI Environment Detail Extract Process Completed. Excel outpu
 
 
 
-Write-Output "Model Backup Process Started"
+Write-Log "========================================" -Level INFO
+Write-Log "MODEL BACKUP PROCESS STARTED" -Level INFO
+Write-Log "========================================" -Level INFO
 
 # Loop through datasetsInfo collection to perform model export
 foreach ($dataset in $datasetsInfo) {
@@ -1038,17 +1032,41 @@ Model.Database.Name = `"$newModelDatabaseName`";
 
         # Construct the argument list for the model export with renaming
         $modelExportArgs = "`"Provider=MSOLAP;Data Source=powerbi://api.powerbi.com/v1.0/myorg/$workspaceName;Password=$(Get-CurrentAccessToken)`" `"$datasetName`" -S `"$tempScriptPath`" -B `"$folderPath\$cleanDatasetWorkspaceName ~ $cleanDatasetName.bim`""
-        
-        # Start the Tabular Editor process for model export and renaming
-		Write-Host "**Exporting $cleanDatasetWorkspaceName ~ $cleanDatasetName**"
-        Start-Process -FilePath "$TabularEditor2Path" -Wait -NoNewWindow -ArgumentList $modelExportArgs
 
-        # Clean up the temporary script file
-        Remove-Item -Path $tempScriptPath
+        # Start the Tabular Editor process for model export and renaming
+        Write-Log "Exporting model: $cleanDatasetWorkspaceName ~ $cleanDatasetName" -Level INFO
+
+        # Capture output and errors
+        $process = Start-Process -FilePath "$TabularEditor2Path" -Wait -NoNewWindow -ArgumentList $modelExportArgs -PassThru -RedirectStandardOutput "$env:TEMP\TabularEditor_stdout.txt" -RedirectStandardError "$env:TEMP\TabularEditor_stderr.txt"
+
+        # Check for errors in stderr
+        $stderr = Get-Content "$env:TEMP\TabularEditor_stderr.txt" -Raw -ErrorAction SilentlyContinue
+        if ($stderr -and $stderr.Trim() -ne "") {
+            # Check if it's actually an error or just info
+            if ($stderr -match "Error|does not have permission|Failed") {
+                Write-Log "Model export error for '$cleanDatasetWorkspaceName ~ $cleanDatasetName': $($stderr.Trim())" -Level ERROR
+            } else {
+                Write-Log "Model export info: $($stderr.Trim())" -Level INFO
+            }
+        }
+
+        # Check exit code
+        if ($process.ExitCode -ne 0) {
+            Write-Log "Model export process exited with code $($process.ExitCode) for '$cleanDatasetWorkspaceName ~ $cleanDatasetName'" -Level WARNING
+        } else {
+            Write-Log "Successfully exported model: $cleanDatasetWorkspaceName ~ $cleanDatasetName" -Level SUCCESS
+        }
+
+        # Clean up the temporary files
+        Remove-Item -Path $tempScriptPath -ErrorAction SilentlyContinue
+        Remove-Item -Path "$env:TEMP\TabularEditor_stdout.txt" -ErrorAction SilentlyContinue
+        Remove-Item -Path "$env:TEMP\TabularEditor_stderr.txt" -ErrorAction SilentlyContinue
     }
 }
 
-Write-Output "Model Backup Process Completed"
+Write-Log "========================================" -Level INFO
+Write-Log "MODEL BACKUP PROCESS COMPLETED" -Level SUCCESS
+Write-Log "========================================" -Level INFO
 
 
 
