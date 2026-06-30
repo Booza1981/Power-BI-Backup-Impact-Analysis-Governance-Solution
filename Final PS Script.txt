@@ -424,41 +424,71 @@ $global:PowerBIEndpoints = Get-PowerBIEndpoints -Environment $EnvironmentForEndp
 
 # Connect to the Power BI Service
 function Connect-PowerBI {
+    [CmdletBinding()]
     param(
-        [string]$Environment
+        [string]$Environment,
+        [int]$MaxAttempts = 2
     )
 
-    if ($Environment) {
-        Connect-PowerBIServiceAccount -Environment $Environment | Out-Null
-    } else {
-        Connect-PowerBIServiceAccount | Out-Null
+    $previousErrorActionPreference = $ErrorActionPreference
+
+    try {
+        $ErrorActionPreference = 'Stop'
+
+        for ($attempt = 1; $attempt -le $MaxAttempts; $attempt++) {
+            try {
+                Write-Host "[INFO] Connecting to Power BI using environment: $EnvironmentForEndpoints" -ForegroundColor Cyan
+
+                if ($Environment) {
+                    Connect-PowerBIServiceAccount -Environment $Environment -ErrorAction Stop | Out-Null
+                }
+                else {
+                    Connect-PowerBIServiceAccount -ErrorAction Stop | Out-Null
+                }
+
+                $token = Get-PowerBIAccessToken -ErrorAction Stop
+                if ($token -and $token.Authorization) {
+                    Write-Host "[INFO] Connected to Power BI." -ForegroundColor Green
+                    return
+                }
+
+                throw "Power BI sign-in completed without returning an access token."
+            }
+            catch {
+                Disconnect-PowerBIServiceAccount -ErrorAction SilentlyContinue | Out-Null
+
+                if ($attempt -ge $MaxAttempts) {
+                    Write-Host "[ERROR] Power BI sign-in failed: $($_.Exception.Message)" -ForegroundColor Red
+                    throw
+                }
+
+                Write-Warning "Power BI sign-in attempt $attempt failed: $($_.Exception.Message). Retrying..."
+                Start-Sleep -Seconds 2
+            }
+        }
+    }
+    finally {
+        $ErrorActionPreference = $previousErrorActionPreference
     }
 }
 
 # Track script start time
 $scriptStartTime = Get-Date
 
-try {
-    Connect-PowerBI -Environment $LoginEnvironment -ErrorAction Stop | Out-Null
-    # First attempt is likely to fail due to MSAL interaction with a window pop-up. Second attempt will then succeed.
-}
-catch {
-    Write-Host "[INFO] Connecting to Power BI using environment: $EnvironmentForEndpoints"
-    Connect-PowerBI -Environment $LoginEnvironment
-}
+Connect-PowerBI -Environment $LoginEnvironment -MaxAttempts 2 -ErrorAction Stop
 
 
 # Function to get the current access token — MSAL auto-refreshes silently via the session cache
 function Get-CurrentAccessToken {
     try {
-        return (Get-PowerBIAccessToken).Authorization -replace 'Bearer ', ''
+        return (Get-PowerBIAccessToken -ErrorAction Stop).Authorization -replace 'Bearer ', ''
     }
     catch {
         # MSAL cache may be corrupt or refresh token revoked — re-connect and retry
         Write-Host "[WARN] Token fetch failed, re-connecting..."
         try {
-            Connect-PowerBIServiceAccount | Out-Null
-            return (Get-PowerBIAccessToken).Authorization -replace 'Bearer ', ''
+            Connect-PowerBI -Environment $LoginEnvironment -MaxAttempts 2 -ErrorAction Stop
+            return (Get-PowerBIAccessToken -ErrorAction Stop).Authorization -replace 'Bearer ', ''
         }
         catch {
             Write-Host "[ERROR] Re-connect also failed: $($_.Exception.Message)"
@@ -3048,4 +3078,3 @@ Write-Output "All Excel files processed and combined successfully."
 $scriptEndTime = Get-Date
 $elapsedTime = New-TimeSpan -Start $scriptStartTime -End $scriptEndTime
 Write-Output "Total Elapsed Time: $($elapsedTime.Hours)h $($elapsedTime.Minutes)m $($elapsedTime.Seconds)s"
- 
