@@ -120,6 +120,35 @@ if ($zipFile) {
     }
 }
 
+# --- Tabular Editor pre-flight check (run once) ---
+# Verify Tabular Editor can actually launch and execute a script before the extract loops run.
+# If it can't (exe blocked/quarantined, missing .NET runtime, etc.), Model Detail and Report
+# Detail outputs would be silently blank — surface a clear error here instead.
+$tabularEditorWorks = $false
+try {
+    $blankModelPath = Join-Path $configFolder "Blank Model.bim"
+    if ((Test-Path $TabularEditor2Path) -and (Test-Path $blankModelPath)) {
+        $teTestScriptPath = Join-Path $env:TEMP "TabularEditor_PreflightCheck.cs"
+        Set-Content -Path $teTestScriptPath -Value 'Info("Tabular Editor preflight OK");' -Encoding UTF8
+
+        $teTestArgs = "`"$blankModelPath`" -S `"$teTestScriptPath`""
+        $teProcess = Start-Process -FilePath $TabularEditor2Path -Wait -NoNewWindow -PassThru -ArgumentList $teTestArgs -ErrorAction Stop
+
+        if ($teProcess.ExitCode -eq 0) {
+            $tabularEditorWorks = $true
+        }
+
+        Remove-Item -Path $teTestScriptPath -Force -ErrorAction SilentlyContinue
+    }
+}
+catch {
+    $tabularEditorWorks = $false
+}
+
+if (-not $tabularEditorWorks) {
+    Write-Host "[ERROR] Tabular Editor is not able to run - this will cause blank outputs for Model Detail and Report Detail" -ForegroundColor Red
+}
+
 $pbiToolsPath = Join-Path -Path $baseFolderPath -ChildPath "Config\PBI Tools\pbi-tools.exe"
 
 # Force TLS 1.2 (required for PSGallery on older systems)
