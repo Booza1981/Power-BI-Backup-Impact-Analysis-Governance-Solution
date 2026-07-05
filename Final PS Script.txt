@@ -592,6 +592,26 @@ function Rename-Properties {
     return $newObject
 }
 
+function Get-ObjectPropertyValue {
+    param(
+        $InputObject,
+        [Parameter(Mandatory)]
+        [string]$Name,
+        $Default = $null
+    )
+
+    if ($null -eq $InputObject) {
+        return $Default
+    }
+
+    $property = $InputObject.PSObject.Properties[$Name]
+    if ($null -ne $property) {
+        return $property.Value
+    }
+
+    return $Default
+}
+
 function Show-WorkspacePicker {
     param(
         [Parameter(Mandatory)]
@@ -1259,8 +1279,8 @@ if ($NonInteractive) {
                         ReportName         = $rpt.name
                         WorkspaceId        = $ws.id
                         WorkspaceName      = $ws.name
-                        DatasetId          = $rpt.datasetId
-                        DatasetWorkspaceId = $rpt.datasetWorkspaceId
+                        DatasetId          = Get-ObjectPropertyValue -InputObject $rpt -Name 'datasetId'
+                        DatasetWorkspaceId = Get-ObjectPropertyValue -InputObject $rpt -Name 'datasetWorkspaceId'
                     }
                 }
             } catch { }
@@ -1390,8 +1410,8 @@ else {
                             ReportName         = $rpt.name
                             WorkspaceId        = $ws.id
                             WorkspaceName      = $ws.name
-                            DatasetId          = $rpt.datasetId
-                            DatasetWorkspaceId = $rpt.datasetWorkspaceId
+                            DatasetId          = Get-ObjectPropertyValue -InputObject $rpt -Name 'datasetId'
+                            DatasetWorkspaceId = Get-ObjectPropertyValue -InputObject $rpt -Name 'datasetWorkspaceId'
                         }
                     }
                 } catch { }
@@ -1534,8 +1554,9 @@ Write-Output "Workspace [$($workspace.WorkspaceName)] Report & Model metadata ex
             $renamedDatasource | Add-Member -NotePropertyName "WorkspaceName" -NotePropertyValue $workspace.WorkspaceName -Force
             $renamedDatasource | Add-Member -NotePropertyName "DatasetId" -NotePropertyValue $dataset.id -Force
             $renamedDatasource | Add-Member -NotePropertyName "DatasetName" -NotePropertyValue $dataset.name -Force
-            if ($datasource.connectionDetails) {
-                $renamedDatasource.DatasetDatasourceConnectionDetails = $datasource.connectionDetails | ConvertTo-Json -Compress
+            $connectionDetails = Get-ObjectPropertyValue -InputObject $datasource -Name 'connectionDetails'
+            if ($connectionDetails) {
+                $renamedDatasource.DatasetDatasourceConnectionDetails = $connectionDetails | ConvertTo-Json -Compress
             }
             $datasetSourcesInfo += $renamedDatasource
         }
@@ -1558,7 +1579,7 @@ Write-Output "Workspace [$($workspace.WorkspaceName)] Report & Model metadata ex
 
 
         # Retrieve and add the correct DatasetName from the lookup table if DatasetId exists
-        $datasetId = $report.datasetId
+        $datasetId = Get-ObjectPropertyValue -InputObject $report -Name 'datasetId'
         if ($datasetId -and $datasetNameLookup.ContainsKey($datasetId)) {
             $renamedReport | Add-Member -NotePropertyName "DatasetName" -NotePropertyValue $datasetNameLookup[$datasetId] -Force
         } else {
@@ -1604,7 +1625,8 @@ $appReportIds = @{}
 $originalReportObjectIds = @{}
 
 foreach ($app in $apps.value) {
-    if ($workspacesInfo.WorkspaceId -contains $app.workspaceId) {
+    $appWorkspaceId = Get-ObjectPropertyValue -InputObject $app -Name 'workspaceId'
+    if ($appWorkspaceId -and ($workspacesInfo.WorkspaceId -contains $appWorkspaceId)) {
         $renamedApp = Rename-Properties -object $app -renameMap $appRenameMap
         $appsInfo += $renamedApp
 
@@ -1620,7 +1642,10 @@ foreach ($app in $apps.value) {
 
             # Store the app report ID in the hash set
             $appReportIds[$report.id] = $true
-            $originalReportObjectIds[$report.originalReportObjectId] = $true
+            $originalReportObjectId = Get-ObjectPropertyValue -InputObject $report -Name 'originalReportObjectId'
+            if ($originalReportObjectId) {
+                $originalReportObjectIds[$originalReportObjectId] = $true
+            }
         }
     }
 }
@@ -1663,8 +1688,10 @@ Write-Output "Workspace [$($workspace.WorkspaceName)] Model Refresh Schedule ext
             $renamedScheduleRecord = Rename-Properties -object $refreshScheduleResponse -renameMap $datasetRefreshScheduleRenameMap
             
             # Create separate rows for each day-time combination
-            $days = if ($refreshScheduleResponse.days) { $refreshScheduleResponse.days } else { @($null) }
-            $times = if ($refreshScheduleResponse.times) { $refreshScheduleResponse.times } else { @($null) }
+            $scheduleDays = Get-ObjectPropertyValue -InputObject $refreshScheduleResponse -Name 'days'
+            $scheduleTimes = Get-ObjectPropertyValue -InputObject $refreshScheduleResponse -Name 'times'
+            $days = if ($scheduleDays) { $scheduleDays } else { @($null) }
+            $times = if ($scheduleTimes) { $scheduleTimes } else { @($null) }
             
             foreach ($day in $days) {
                 foreach ($time in $times) {
@@ -1725,9 +1752,10 @@ Write-Output "Workspace [$($workspace.WorkspaceName)] Dataflow metadata extracti
                     $renamedDataflowDatasource | Add-Member -NotePropertyName "WorkspaceName" -NotePropertyValue $workspace.WorkspaceName -Force
                     $renamedDataflowDatasource | Add-Member -NotePropertyName "DataflowId" -NotePropertyValue $dataflow.objectId -Force
 
-            		if ($datasource.connectionDetails) {
-               		 $renamedDataflowDatasource.DataflowDatasourceConnectionDetails = $datasource.connectionDetails | ConvertTo-Json -Compress
-            }
+                    $connectionDetails = Get-ObjectPropertyValue -InputObject $datasource -Name 'connectionDetails'
+                    if ($connectionDetails) {
+                        $renamedDataflowDatasource.DataflowDatasourceConnectionDetails = $connectionDetails | ConvertTo-Json -Compress
+                    }
                     
 
                     if ($dataflowNameLookup.ContainsKey($dataflow.objectId)) {
@@ -1918,8 +1946,9 @@ if ($IncludeMyWorkspace -or ($selection -and $selection.TimedOut)) {
             $renamedDatasource | Add-Member -NotePropertyName "WorkspaceName" -NotePropertyValue $myWorkspaceName -Force
             $renamedDatasource | Add-Member -NotePropertyName "DatasetId" -NotePropertyValue $dataset.id -Force
             $renamedDatasource | Add-Member -NotePropertyName "DatasetName" -NotePropertyValue $dataset.name -Force
-            if ($datasource.connectionDetails) {
-                $renamedDatasource.DatasetDatasourceConnectionDetails = $datasource.connectionDetails | ConvertTo-Json -Compress
+            $connectionDetails = Get-ObjectPropertyValue -InputObject $datasource -Name 'connectionDetails'
+            if ($connectionDetails) {
+                $renamedDatasource.DatasetDatasourceConnectionDetails = $connectionDetails | ConvertTo-Json -Compress
             }
             $datasetSourcesInfo += $renamedDatasource
         }
@@ -1937,11 +1966,12 @@ if ($IncludeMyWorkspace -or ($selection -and $selection.TimedOut)) {
         }
         
         # Skip reports with appId - these are shared via apps, not actually in My Workspace
-        if ($report.appId) {
+        if (Get-ObjectPropertyValue -InputObject $report -Name 'appId') {
             continue
         }
 
-        if ($report.isOwnedByMe -eq $false) {
+        $isOwnedByMe = Get-ObjectPropertyValue -InputObject $report -Name 'isOwnedByMe' -Default $true
+        if ($isOwnedByMe -eq $false) {
             $workspaceIdValue = "Shared Reports (No Workspace Access)"
             $workspaceNameValue = "Shared Reports (No Workspace Access)"
             $sharedReportExists = $true
@@ -1954,7 +1984,7 @@ if ($IncludeMyWorkspace -or ($selection -and $selection.TimedOut)) {
         $renamedReport | Add-Member -NotePropertyName "WorkspaceId" -NotePropertyValue $workspaceIdValue -Force
         $renamedReport | Add-Member -NotePropertyName "WorkspaceName" -NotePropertyValue $workspaceNameValue -Force
 
-        $datasetId = $report.datasetId
+        $datasetId = Get-ObjectPropertyValue -InputObject $report -Name 'datasetId'
         if ($datasetId -and $datasetNameLookup.ContainsKey($datasetId)) {
             $renamedReport | Add-Member -NotePropertyName "DatasetName" -NotePropertyValue $datasetNameLookup[$datasetId] -Force
         } else {
@@ -1968,8 +1998,8 @@ if ($IncludeMyWorkspace -or ($selection -and $selection.TimedOut)) {
             $renamedPage = Rename-Properties -object $page -renameMap $pageRenameMap
             $renamedPage | Add-Member -NotePropertyName "WorkspaceId" -NotePropertyValue $workspaceIdValue -Force
             $renamedPage | Add-Member -NotePropertyName "WorkspaceName" -NotePropertyValue $workspaceNameValue -Force
-            $renamedPage | Add-Member -NotePropertyValue "ReportId" -NotePropertyValue $report.id -Force
-            $renamedPage | Add-Member -NotePropertyValue "ReportName" -NotePropertyValue $report.name -Force
+            $renamedPage | Add-Member -NotePropertyName "ReportId" -NotePropertyValue $report.id -Force
+            $renamedPage | Add-Member -NotePropertyName "ReportName" -NotePropertyValue $report.name -Force
             $reportPagesInfo += $renamedPage
         }
     }
@@ -2010,8 +2040,10 @@ if ($IncludeMyWorkspace -or ($selection -and $selection.TimedOut)) {
             $renamedScheduleRecord = Rename-Properties -object $refreshScheduleResponse -renameMap $datasetRefreshScheduleRenameMap
             
             # Create separate rows for each day-time combination
-            $days = if ($refreshScheduleResponse.days) { $refreshScheduleResponse.days } else { @($null) }
-            $times = if ($refreshScheduleResponse.times) { $refreshScheduleResponse.times } else { @($null) }
+            $scheduleDays = Get-ObjectPropertyValue -InputObject $refreshScheduleResponse -Name 'days'
+            $scheduleTimes = Get-ObjectPropertyValue -InputObject $refreshScheduleResponse -Name 'times'
+            $days = if ($scheduleDays) { $scheduleDays } else { @($null) }
+            $times = if ($scheduleTimes) { $scheduleTimes } else { @($null) }
             
             foreach ($day in $days) {
                 foreach ($time in $times) {
