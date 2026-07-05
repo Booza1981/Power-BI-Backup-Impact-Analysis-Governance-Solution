@@ -1,6 +1,23 @@
 # Define the base folder and script paths at the beginning of the script
 
-$global:BaseFolderPath = "C:\Power BI Backups"
+param(
+    [string]$BaseFolderPath = "C:\Power BI Backups",
+    [string]$LoginEnvironment = '',
+    [ValidateSet('Workspaces', 'Reports')]
+    [string]$RunMode = 'Workspaces',
+    [string[]]$WorkspaceIds = @(),
+    [string[]]$ReportIds = @(),
+    [switch]$AllWorkspaces,
+    [switch]$IncludeMyWorkspace,
+    [switch]$DeleteReportBackupsAfterExtraction,
+    [switch]$NonInteractive
+)
+
+if ($NonInteractive -and [string]::IsNullOrWhiteSpace($LoginEnvironment)) {
+    $LoginEnvironment = 'Public'
+}
+
+$global:BaseFolderPath = $BaseFolderPath
 $global:ConfigFolder   = Join-Path $global:BaseFolderPath "Config"
 
 $baseFolderPath = $global:BaseFolderPath
@@ -310,7 +327,7 @@ function Show-EnvironmentSelectionDialog {
 # ============================================
 # Prompt for Power BI Environment + Validation
 # ============================================
-if (-not (Get-Variable -Name LoginEnvironment -Scope Script -ErrorAction SilentlyContinue)) {
+if ([string]::IsNullOrWhiteSpace($LoginEnvironment)) {
 
     $selectedEnv = Show-EnvironmentSelectionDialog -TimeoutSeconds 60
 
@@ -339,6 +356,13 @@ if (-not (Get-Variable -Name LoginEnvironment -Scope Script -ErrorAction Silentl
         
         Write-Host "[INFO] Selected environment: $LoginEnvironment" -ForegroundColor Green
     }
+}
+else {
+    $validLoginEnvironments = @('Public', 'Germany', 'USGov', 'China', 'USGovHigh', 'USGovMil')
+    if ($validLoginEnvironments -notcontains $LoginEnvironment) {
+        throw "Invalid LoginEnvironment '$LoginEnvironment'. Use one of: $($validLoginEnvironments -join ', ')"
+    }
+    Write-Host "[INFO] Selected environment from parameter: $LoginEnvironment" -ForegroundColor Green
 }
 
 # If explicitly 'Public', set to $null for Connect-PowerBIServiceAccount default
@@ -1130,60 +1154,37 @@ $workspacesUrl = "$($global:PowerBIEndpoints.ApiPrefix)/v1.0/myorg/groups"
 $workspacesResponse = Invoke-PowerBIRestMethod -Method GET -Url $workspacesUrl | ConvertFrom-Json
 $workspacesInfo = @()
 
-# --- Show Run Mode Dialog (loop back on Cancel from report picker) ---
-$reportPickerCancelled = $true
-while ($reportPickerCancelled) {
-    $reportPickerCancelled = $false
-    $runMode = Show-RunModeDialog
+# --- Select run scope (interactive dialogs by default; parameter-driven for scheduled runs) ---
+$selection = $null
 
-if ($runMode -eq 'Reports') {
-    # ---- Reports Mode: choose scope, optionally pick workspaces, then pick reports ----
-    # Each sub-dialog cancel steps back ONE level (instead of bouncing all the way
-    # out, which previously looked like an infinite loop).
-    $reportSelectionComplete = $false
-    while (-not $reportSelectionComplete) {
+if ($NonInteractive) {
+    Write-Host "[INFO] Running in non-interactive scheduled mode. RunMode: $RunMode"
+    $global:RunMode = $RunMode
 
-        $reportScope = Show-ReportScopeDialog
-
-        if ($reportScope -eq 'Cancel') {
-            # Step all the way back to the run-mode selector
-            Write-Host "[INFO] Report scope selection cancelled. Returning to run mode selection..."
-            $reportPickerCancelled = $true
-            break
+    if ($RunMode -eq 'Reports') {
+        if (-not $ReportIds -or $ReportIds.Count -eq 0) {
+            throw "NonInteractive Reports mode requires -ReportIds."
         }
 
-        # Decide which workspaces to scan for reports
-        $workspacesToScan = $null
-        if ($reportScope -eq 'Specific') {
-            # Pop the workspace chooser; Cancel returns to the scope question
-            $scopeSelection = $null
-            $scopeCancelled = $false
-            try {
-                $scopeSelection = Show-WorkspacePicker -Workspaces $workspacesResponse.value
-            }
-            catch {
-                $scopeCancelled = $true
-            }
-            if ($scopeCancelled) {
-                Write-Host "[INFO] Workspace selection cancelled. Returning to report scope selection..."
-                continue
-            }
-
-            $scopeWorkspaceIds = @($scopeSelection.SelectedWorkspaceIds)
-            if (-not $scopeWorkspaceIds -or $scopeWorkspaceIds.Count -eq 0) {
-                Write-Warning "No workspaces selected - showing reports from ALL workspaces instead."
-                $workspacesToScan = $workspacesResponse.value
-            } else {
-                $workspacesToScan = @($workspacesResponse.value | Where-Object { $scopeWorkspaceIds -contains $_.id })
+        $global:SelectedReportIds  = @{}
+        $global:SelectedDatasetIds = @{}
+        foreach ($reportId in $ReportIds) {
+            if (-not [string]::IsNullOrWhiteSpace($reportId)) {
+                $global:SelectedReportIds[$reportId] = $true
             }
         }
-        else {
-            # 'All' - scan every accessible workspace
-            $workspacesToScan = $workspacesResponse.value
+
+        $workspacesToScan = if ($WorkspaceIds -and $WorkspaceIds.Count -gt 0) {
+            @($workspacesResponse.value | Where-Object { $WorkspaceIds -contains $_.id })
+        } else {
+            @($workspacesResponse.value)
         }
 
-        # ---- Fetch reports from the chosen workspaces ----
-        Write-Host "[INFO] Fetching reports for selection..."
+        if (-not $workspacesToScan -or $workspacesToScan.Count -eq 0) {
+            throw "NonInteractive Reports mode found no accessible workspaces to scan. Check -WorkspaceIds or Power BI permissions."
+        }
+
+        Write-Host "[INFO] Fetching reports for configured ReportIds..."
         $allReportsForPicker = @()
         $wsCount = 0
         $wsTotal = @($workspacesToScan).Count
@@ -1206,38 +1207,18 @@ if ($runMode -eq 'Reports') {
             } catch { }
         }
         Write-Host ""
-        Write-Host "[INFO] Found $($allReportsForPicker.Count) reports across $($wsTotal) workspace(s)."
 
-        if ($allReportsForPicker.Count -eq 0) {
-            Write-Warning "No reports found in the selected workspace(s). Returning to report scope selection..."
-            continue
+        $selectedReports = @($allReportsForPicker | Where-Object { $global:SelectedReportIds.ContainsKey($_.ReportId) })
+        $foundReportIds = @($selectedReports | ForEach-Object { $_.ReportId })
+        $missingReportIds = @($ReportIds | Where-Object { $foundReportIds -notcontains $_ })
+        if ($missingReportIds.Count -gt 0) {
+            throw "Configured ReportIds were not found in accessible workspaces: $($missingReportIds -join ', ')"
         }
 
-        # ---- Show report picker ----
-        $selectedReports = Show-ReportPicker -Reports $allReportsForPicker
-
-        if ($null -eq $selectedReports) {
-            # User cancelled the report picker - back to the scope question
-            Write-Host "[INFO] Report selection cancelled. Returning to report scope selection..."
-            continue
-        }
-
-        if ($selectedReports.Count -eq 0) {
-            Write-Warning "No reports selected. Returning to report scope selection..."
-            continue
-        }
-
-        # Determine workspace IDs needed: report workspaces + dataset workspaces for connected models
         $neededWorkspaceIds = @()
-        $global:SelectedReportIds  = @{}
-        $global:SelectedDatasetIds = @{}
-
         foreach ($rpt in $selectedReports) {
-            $global:SelectedReportIds[$rpt.ReportId] = $true
             if ($rpt.WorkspaceId)  { $neededWorkspaceIds += $rpt.WorkspaceId }
             if ($rpt.DatasetId)    { $global:SelectedDatasetIds[$rpt.DatasetId] = $true }
-
-            # If the dataset lives in a different workspace, include that workspace too
             if ($rpt.DatasetWorkspaceId -and $rpt.DatasetWorkspaceId -ne $rpt.WorkspaceId) {
                 $neededWorkspaceIds += $rpt.DatasetWorkspaceId
                 Write-Host "[INFO] Report '$($rpt.ReportName)' uses a remote model in workspace $($rpt.DatasetWorkspaceId) - including that workspace."
@@ -1245,57 +1226,208 @@ if ($runMode -eq 'Reports') {
         }
         $neededWorkspaceIds = $neededWorkspaceIds | Select-Object -Unique
 
-        # Build workspacesInfo from needed workspaces
         foreach ($workspace in $workspacesResponse.value) {
             if ($neededWorkspaceIds -notcontains $workspace.id) { continue }
             $workspacesInfo += Rename-Properties -object $workspace -renameMap $workspaceRenameMap
         }
 
         if ($workspacesInfo.Count -eq 0) {
-            Write-Warning "No accessible workspaces found for the selected reports. Returning to report scope selection..."
-            continue
+            throw "No accessible workspaces found for the configured ReportIds."
         }
 
         $IncludeMyWorkspace = $false
-        $global:RunMode = 'Reports'
-        $reportSelectionComplete = $true
-    } # end inner while (report selection)
-
-    # If the user backed all the way out, re-show the run-mode selector
-    if ($reportPickerCancelled) { continue }
-
-} else {
-    # ---- Workspaces Mode: existing behavior ----
-    $global:RunMode = 'Workspaces'
-
-    try {
-        $selection = Show-WorkspacePicker -Workspaces $workspacesResponse.value
+        Write-Host "[INFO] Configured report scope: $($selectedReports.Count) report(s), $($workspacesInfo.Count) workspace(s)."
     }
-    catch {
-        Write-Warning "WinForms not available. Defaulting to ALL workspaces and INCLUDING My Workspace."
-        $selection = [pscustomobject]@{
-            SelectedWorkspaceIds = $workspacesResponse.value.id
-            IncludeMyWorkspace   = $true
+    else {
+        if ($WorkspaceIds -and $WorkspaceIds.Count -gt 0) {
+            $selectedWorkspaceIds = @($WorkspaceIds)
         }
+        elseif ($AllWorkspaces) {
+            $selectedWorkspaceIds = @($workspacesResponse.value.id)
+        }
+        else {
+            throw "NonInteractive Workspaces mode requires -WorkspaceIds or -AllWorkspaces."
+        }
+
+        foreach ($workspace in $workspacesResponse.value) {
+            if ($selectedWorkspaceIds -notcontains $workspace.id) { continue }
+            $workspacesInfo += Rename-Properties -object $workspace -renameMap $workspaceRenameMap
+        }
+
+        if ($workspacesInfo.Count -eq 0) {
+            throw "No accessible workspaces matched the configured -WorkspaceIds."
+        }
+
+        Write-Host "[INFO] Configured workspace scope: $($workspacesInfo.Count) workspace(s). IncludeMyWorkspace: $IncludeMyWorkspace"
     }
-
-    # Build filtered workspaces
-    $selectedWorkspaceIds = @($selection.SelectedWorkspaceIds)
-
-    if (-not $selectedWorkspaceIds -or $selectedWorkspaceIds.Count -eq 0) {
-        throw "No workspaces selected."
-    }
-
-    foreach ($workspace in $workspacesResponse.value) {
-        if ($selectedWorkspaceIds -notcontains $workspace.id) { continue }
-        $workspacesInfo += Rename-Properties -object $workspace -renameMap $workspaceRenameMap
-    }
-
-    # Flag for later "My Workspace" section
-    $IncludeMyWorkspace = $selection.IncludeMyWorkspace
 }
-} # end while (reportPickerCancelled)
+else {
+    # --- Show Run Mode Dialog (loop back on Cancel from report picker) ---
+    $reportPickerCancelled = $true
+    while ($reportPickerCancelled) {
+        $reportPickerCancelled = $false
+        $runMode = Show-RunModeDialog
 
+    if ($runMode -eq 'Reports') {
+        # ---- Reports Mode: choose scope, optionally pick workspaces, then pick reports ----
+        # Each sub-dialog cancel steps back ONE level (instead of bouncing all the way
+        # out, which previously looked like an infinite loop).
+        $reportSelectionComplete = $false
+        while (-not $reportSelectionComplete) {
+
+            $reportScope = Show-ReportScopeDialog
+
+            if ($reportScope -eq 'Cancel') {
+                # Step all the way back to the run-mode selector
+                Write-Host "[INFO] Report scope selection cancelled. Returning to run mode selection..."
+                $reportPickerCancelled = $true
+                break
+            }
+
+            # Decide which workspaces to scan for reports
+            $workspacesToScan = $null
+            if ($reportScope -eq 'Specific') {
+                # Pop the workspace chooser; Cancel returns to the scope question
+                $scopeSelection = $null
+                $scopeCancelled = $false
+                try {
+                    $scopeSelection = Show-WorkspacePicker -Workspaces $workspacesResponse.value
+                }
+                catch {
+                    $scopeCancelled = $true
+                }
+                if ($scopeCancelled) {
+                    Write-Host "[INFO] Workspace selection cancelled. Returning to report scope selection..."
+                    continue
+                }
+
+                $scopeWorkspaceIds = @($scopeSelection.SelectedWorkspaceIds)
+                if (-not $scopeWorkspaceIds -or $scopeWorkspaceIds.Count -eq 0) {
+                    Write-Warning "No workspaces selected - showing reports from ALL workspaces instead."
+                    $workspacesToScan = $workspacesResponse.value
+                } else {
+                    $workspacesToScan = @($workspacesResponse.value | Where-Object { $scopeWorkspaceIds -contains $_.id })
+                }
+            }
+            else {
+                # 'All' - scan every accessible workspace
+                $workspacesToScan = $workspacesResponse.value
+            }
+
+            # ---- Fetch reports from the chosen workspaces ----
+            Write-Host "[INFO] Fetching reports for selection..."
+            $allReportsForPicker = @()
+            $wsCount = 0
+            $wsTotal = @($workspacesToScan).Count
+            foreach ($ws in $workspacesToScan) {
+                $wsCount++
+                Write-Host "`r[INFO] Scanning workspace $wsCount of $($wsTotal): $($ws.name)" -NoNewline
+                $reportsUrl = "$($global:PowerBIEndpoints.ApiPrefix)/v1.0/myorg/groups/$($ws.id)/reports"
+                try {
+                    $reportsResp = Invoke-PowerBIRestMethod -Method GET -Url $reportsUrl | ConvertFrom-Json
+                    foreach ($rpt in $reportsResp.value) {
+                        $allReportsForPicker += [pscustomobject]@{
+                            ReportId           = $rpt.id
+                            ReportName         = $rpt.name
+                            WorkspaceId        = $ws.id
+                            WorkspaceName      = $ws.name
+                            DatasetId          = $rpt.datasetId
+                            DatasetWorkspaceId = $rpt.datasetWorkspaceId
+                        }
+                    }
+                } catch { }
+            }
+            Write-Host ""
+            Write-Host "[INFO] Found $($allReportsForPicker.Count) reports across $($wsTotal) workspace(s)."
+
+            if ($allReportsForPicker.Count -eq 0) {
+                Write-Warning "No reports found in the selected workspace(s). Returning to report scope selection..."
+                continue
+            }
+
+            # ---- Show report picker ----
+            $selectedReports = Show-ReportPicker -Reports $allReportsForPicker
+
+            if ($null -eq $selectedReports) {
+                # User cancelled the report picker - back to the scope question
+                Write-Host "[INFO] Report selection cancelled. Returning to report scope selection..."
+                continue
+            }
+
+            if ($selectedReports.Count -eq 0) {
+                Write-Warning "No reports selected. Returning to report scope selection..."
+                continue
+            }
+
+            # Determine workspace IDs needed: report workspaces + dataset workspaces for connected models
+            $neededWorkspaceIds = @()
+            $global:SelectedReportIds  = @{}
+            $global:SelectedDatasetIds = @{}
+
+            foreach ($rpt in $selectedReports) {
+                $global:SelectedReportIds[$rpt.ReportId] = $true
+                if ($rpt.WorkspaceId)  { $neededWorkspaceIds += $rpt.WorkspaceId }
+                if ($rpt.DatasetId)    { $global:SelectedDatasetIds[$rpt.DatasetId] = $true }
+
+                # If the dataset lives in a different workspace, include that workspace too
+                if ($rpt.DatasetWorkspaceId -and $rpt.DatasetWorkspaceId -ne $rpt.WorkspaceId) {
+                    $neededWorkspaceIds += $rpt.DatasetWorkspaceId
+                    Write-Host "[INFO] Report '$($rpt.ReportName)' uses a remote model in workspace $($rpt.DatasetWorkspaceId) - including that workspace."
+                }
+            }
+            $neededWorkspaceIds = $neededWorkspaceIds | Select-Object -Unique
+
+            # Build workspacesInfo from needed workspaces
+            foreach ($workspace in $workspacesResponse.value) {
+                if ($neededWorkspaceIds -notcontains $workspace.id) { continue }
+                $workspacesInfo += Rename-Properties -object $workspace -renameMap $workspaceRenameMap
+            }
+
+            if ($workspacesInfo.Count -eq 0) {
+                Write-Warning "No accessible workspaces found for the selected reports. Returning to report scope selection..."
+                continue
+            }
+
+            $IncludeMyWorkspace = $false
+            $global:RunMode = 'Reports'
+            $reportSelectionComplete = $true
+        } # end inner while (report selection)
+
+        # If the user backed all the way out, re-show the run-mode selector
+        if ($reportPickerCancelled) { continue }
+
+    } else {
+        # ---- Workspaces Mode: existing behavior ----
+        $global:RunMode = 'Workspaces'
+
+        try {
+            $selection = Show-WorkspacePicker -Workspaces $workspacesResponse.value
+        }
+        catch {
+            Write-Warning "WinForms not available. Defaulting to ALL workspaces and INCLUDING My Workspace."
+            $selection = [pscustomobject]@{
+                SelectedWorkspaceIds = $workspacesResponse.value.id
+                IncludeMyWorkspace   = $true
+            }
+        }
+
+        # Build filtered workspaces
+        $selectedWorkspaceIds = @($selection.SelectedWorkspaceIds)
+
+        if (-not $selectedWorkspaceIds -or $selectedWorkspaceIds.Count -eq 0) {
+            throw "No workspaces selected."
+        }
+
+        foreach ($workspace in $workspacesResponse.value) {
+            if ($selectedWorkspaceIds -notcontains $workspace.id) { continue }
+            $workspacesInfo += Rename-Properties -object $workspace -renameMap $workspaceRenameMap
+        }
+
+        # Flag for later "My Workspace" section
+        $IncludeMyWorkspace = $selection.IncludeMyWorkspace
+    }
+    } # end while (reportPickerCancelled)
+}
 
 # Initialize collections for all necessary information
 $fabricItemsInfo = @()
@@ -3045,7 +3177,19 @@ Write-Output "Dataflow Backup and Detail Extraction Process Completed. Excel out
 
 Write-Output "All Excel files processed and combined successfully."
 
+if ($DeleteReportBackupsAfterExtraction) {
+    $reportBackupsPath = Join-Path -Path $baseFolderPath -ChildPath "Report Backups"
+    if (Test-Path -Path $reportBackupsPath) {
+        Write-Host "[INFO] Removing Report Backups to save disk space: $reportBackupsPath"
+        Remove-Item -Path $reportBackupsPath -Recurse -Force -ErrorAction SilentlyContinue
+    }
+    else {
+        Write-Host "[INFO] DeleteReportBackupsAfterExtraction requested, but no Report Backups folder was found."
+    }
+}
+
 $scriptEndTime = Get-Date
 $elapsedTime = New-TimeSpan -Start $scriptStartTime -End $scriptEndTime
+Write-Output "Total Elapsed Time: $($elapsedTime.Hours)h $($elapsedTime.Minutes)m $($elapsedTime.Seconds)s"
 Write-Output "Total Elapsed Time: $($elapsedTime.Hours)h $($elapsedTime.Minutes)m $($elapsedTime.Seconds)s"
  
