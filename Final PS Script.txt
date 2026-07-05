@@ -1545,8 +1545,11 @@ Write-Output "Workspace [$($workspace.WorkspaceName)] Report & Model metadata ex
     $reportsUrl = "$($global:PowerBIEndpoints.ApiPrefix)/v1.0/myorg/groups/$($workspace.WorkspaceId)/reports"
     $reports = Invoke-PowerBIRestMethod -Method GET -Url $reportsUrl | ConvertFrom-Json
 
-	# Create a hash set to store Report IDs
-	$reportIds = @{}
+	# Create a hash set to store captured workspace Report IDs.
+	# Do not call this $ReportIds/$reportIds: PowerShell variable names are
+	# case-insensitive, so that collides with the [string[]] -ReportIds
+	# script parameter used by scheduled Reports mode.
+	$capturedWorkspaceReportIds = @{}
 
     foreach ($report in $reports.value) {
         $renamedReport = Rename-Properties -object $report -renameMap $reportRenameMap
@@ -1576,7 +1579,7 @@ Write-Output "Workspace [$($workspace.WorkspaceName)] Report & Model metadata ex
             $reportPagesInfo += $renamedPage
 
             # Store the report ID in the hash set
-            $reportIds[$report.id] = $true
+            $capturedWorkspaceReportIds[$report.id] = $true
         }
     }
 Write-Output "Workspace [$($workspace.WorkspaceName)] Report & Model metadata extraction process completed."
@@ -1929,7 +1932,7 @@ if ($IncludeMyWorkspace -or ($selection -and $selection.TimedOut)) {
     $sharedReportExists = $false
     foreach ($report in $myWorkspaceReports.value) {
         # Skip if already captured elsewhere (workspace/app)
-        if ($appReportIds.ContainsKey($report.id) -or $reportIds.ContainsKey($report.id) -or $originalReportObjectIds.ContainsKey($report.id)) {
+        if ($appReportIds.ContainsKey($report.id) -or $capturedWorkspaceReportIds.ContainsKey($report.id) -or $originalReportObjectIds.ContainsKey($report.id)) {
             continue
         }
         
