@@ -612,6 +612,17 @@ function Get-ObjectPropertyValue {
     return $Default
 }
 
+function Get-ObjectValueCollection {
+    param($InputObject)
+
+    $value = Get-ObjectPropertyValue -InputObject $InputObject -Name 'value'
+    if ($null -eq $value) {
+        return @()
+    }
+
+    return @($value)
+}
+
 function Show-WorkspacePicker {
     param(
         [Parameter(Mandatory)]
@@ -1254,9 +1265,9 @@ if ($NonInteractive) {
         }
 
         $workspacesToScan = if ($WorkspaceIds -and $WorkspaceIds.Count -gt 0) {
-            @($workspacesResponse.value | Where-Object { $WorkspaceIds -contains $_.id })
+            @((Get-ObjectValueCollection -InputObject $workspacesResponse) | Where-Object { $WorkspaceIds -contains $_.id })
         } else {
-            @($workspacesResponse.value)
+            @((Get-ObjectValueCollection -InputObject $workspacesResponse))
         }
 
         if (-not $workspacesToScan -or $workspacesToScan.Count -eq 0) {
@@ -1273,7 +1284,7 @@ if ($NonInteractive) {
             $reportsUrl = "$($global:PowerBIEndpoints.ApiPrefix)/v1.0/myorg/groups/$($ws.id)/reports"
             try {
                 $reportsResp = Invoke-PowerBIRestMethod -Method GET -Url $reportsUrl | ConvertFrom-Json
-                foreach ($rpt in $reportsResp.value) {
+                foreach ($rpt in (Get-ObjectValueCollection -InputObject $reportsResp)) {
                     $allReportsForPicker += [pscustomobject]@{
                         ReportId           = $rpt.id
                         ReportName         = $rpt.name
@@ -1305,7 +1316,7 @@ if ($NonInteractive) {
         }
         $neededWorkspaceIds = $neededWorkspaceIds | Select-Object -Unique
 
-        foreach ($workspace in $workspacesResponse.value) {
+        foreach ($workspace in (Get-ObjectValueCollection -InputObject $workspacesResponse)) {
             if ($neededWorkspaceIds -notcontains $workspace.id) { continue }
             $workspacesInfo += Rename-Properties -object $workspace -renameMap $workspaceRenameMap
         }
@@ -1322,13 +1333,13 @@ if ($NonInteractive) {
             $selectedWorkspaceIds = @($WorkspaceIds)
         }
         elseif ($AllWorkspaces) {
-            $selectedWorkspaceIds = @($workspacesResponse.value.id)
+            $selectedWorkspaceIds = @((Get-ObjectValueCollection -InputObject $workspacesResponse).id)
         }
         else {
             throw "NonInteractive Workspaces mode requires -WorkspaceIds or -AllWorkspaces."
         }
 
-        foreach ($workspace in $workspacesResponse.value) {
+        foreach ($workspace in (Get-ObjectValueCollection -InputObject $workspacesResponse)) {
             if ($selectedWorkspaceIds -notcontains $workspace.id) { continue }
             $workspacesInfo += Rename-Properties -object $workspace -renameMap $workspaceRenameMap
         }
@@ -1370,7 +1381,7 @@ else {
                 $scopeSelection = $null
                 $scopeCancelled = $false
                 try {
-                    $scopeSelection = Show-WorkspacePicker -Workspaces $workspacesResponse.value
+                    $scopeSelection = Show-WorkspacePicker -Workspaces (Get-ObjectValueCollection -InputObject $workspacesResponse)
                 }
                 catch {
                     $scopeCancelled = $true
@@ -1383,14 +1394,14 @@ else {
                 $scopeWorkspaceIds = @($scopeSelection.SelectedWorkspaceIds)
                 if (-not $scopeWorkspaceIds -or $scopeWorkspaceIds.Count -eq 0) {
                     Write-Warning "No workspaces selected - showing reports from ALL workspaces instead."
-                    $workspacesToScan = $workspacesResponse.value
+                    $workspacesToScan = (Get-ObjectValueCollection -InputObject $workspacesResponse)
                 } else {
-                    $workspacesToScan = @($workspacesResponse.value | Where-Object { $scopeWorkspaceIds -contains $_.id })
+                    $workspacesToScan = @((Get-ObjectValueCollection -InputObject $workspacesResponse) | Where-Object { $scopeWorkspaceIds -contains $_.id })
                 }
             }
             else {
                 # 'All' - scan every accessible workspace
-                $workspacesToScan = $workspacesResponse.value
+                $workspacesToScan = (Get-ObjectValueCollection -InputObject $workspacesResponse)
             }
 
             # ---- Fetch reports from the chosen workspaces ----
@@ -1404,7 +1415,7 @@ else {
                 $reportsUrl = "$($global:PowerBIEndpoints.ApiPrefix)/v1.0/myorg/groups/$($ws.id)/reports"
                 try {
                     $reportsResp = Invoke-PowerBIRestMethod -Method GET -Url $reportsUrl | ConvertFrom-Json
-                    foreach ($rpt in $reportsResp.value) {
+                    foreach ($rpt in (Get-ObjectValueCollection -InputObject $reportsResp)) {
                         $allReportsForPicker += [pscustomobject]@{
                             ReportId           = $rpt.id
                             ReportName         = $rpt.name
@@ -1457,7 +1468,7 @@ else {
             $neededWorkspaceIds = $neededWorkspaceIds | Select-Object -Unique
 
             # Build workspacesInfo from needed workspaces
-            foreach ($workspace in $workspacesResponse.value) {
+            foreach ($workspace in (Get-ObjectValueCollection -InputObject $workspacesResponse)) {
                 if ($neededWorkspaceIds -notcontains $workspace.id) { continue }
                 $workspacesInfo += Rename-Properties -object $workspace -renameMap $workspaceRenameMap
             }
@@ -1480,12 +1491,12 @@ else {
         $global:RunMode = 'Workspaces'
 
         try {
-            $selection = Show-WorkspacePicker -Workspaces $workspacesResponse.value
+            $selection = Show-WorkspacePicker -Workspaces (Get-ObjectValueCollection -InputObject $workspacesResponse)
         }
         catch {
             Write-Warning "WinForms not available. Defaulting to ALL workspaces and INCLUDING My Workspace."
             $selection = [pscustomobject]@{
-                SelectedWorkspaceIds = $workspacesResponse.value.id
+                SelectedWorkspaceIds = (Get-ObjectValueCollection -InputObject $workspacesResponse).id
                 IncludeMyWorkspace   = $true
             }
         }
@@ -1497,7 +1508,7 @@ else {
             throw "No workspaces selected."
         }
 
-        foreach ($workspace in $workspacesResponse.value) {
+        foreach ($workspace in (Get-ObjectValueCollection -InputObject $workspacesResponse)) {
             if ($selectedWorkspaceIds -notcontains $workspace.id) { continue }
             $workspacesInfo += Rename-Properties -object $workspace -renameMap $workspaceRenameMap
         }
@@ -1535,7 +1546,7 @@ Write-Output "Workspace [$($workspace.WorkspaceName)] Report & Model metadata ex
     $datasetsUrl = "$($global:PowerBIEndpoints.ApiPrefix)/v1.0/myorg/groups/$($workspace.WorkspaceId)/datasets"
     $datasets = Invoke-PowerBIRestMethod -Method GET -Url $datasetsUrl | ConvertFrom-Json
 
-    foreach ($dataset in $datasets.value) {
+    foreach ($dataset in (Get-ObjectValueCollection -InputObject $datasets)) {
         $renamedDataset = Rename-Properties -object $dataset -renameMap $datasetRenameMap
         $renamedDataset | Add-Member -NotePropertyName "WorkspaceId" -NotePropertyValue $workspace.WorkspaceId -Force
         $renamedDataset | Add-Member -NotePropertyName "WorkspaceName" -NotePropertyValue $workspace.WorkspaceName -Force
@@ -1548,7 +1559,7 @@ Write-Output "Workspace [$($workspace.WorkspaceName)] Report & Model metadata ex
         $datasourcesUrl = "$($global:PowerBIEndpoints.ApiPrefix)/v1.0/myorg/groups/$($workspace.WorkspaceId)/datasets/$($dataset.id)/datasources"
         $datasources = Invoke-PowerBIRestMethod -Method GET -Url $datasourcesUrl | ConvertFrom-Json
 
-        foreach ($datasource in $datasources.value) {
+        foreach ($datasource in (Get-ObjectValueCollection -InputObject $datasources)) {
             $renamedDatasource = Rename-Properties -object $datasource -renameMap $datasetDatasourceRenameMap
             $renamedDatasource | Add-Member -NotePropertyName "WorkspaceId" -NotePropertyValue $workspace.WorkspaceId -Force
             $renamedDatasource | Add-Member -NotePropertyName "WorkspaceName" -NotePropertyValue $workspace.WorkspaceName -Force
@@ -1572,7 +1583,7 @@ Write-Output "Workspace [$($workspace.WorkspaceName)] Report & Model metadata ex
 	# script parameter used by scheduled Reports mode.
 	$capturedWorkspaceReportIds = @{}
 
-    foreach ($report in $reports.value) {
+    foreach ($report in (Get-ObjectValueCollection -InputObject $reports)) {
         $renamedReport = Rename-Properties -object $report -renameMap $reportRenameMap
         $renamedReport | Add-Member -NotePropertyName "WorkspaceId" -NotePropertyValue $workspace.WorkspaceId -Force
         $renamedReport | Add-Member -NotePropertyName "WorkspaceName" -NotePropertyValue $workspace.WorkspaceName -Force
@@ -1591,7 +1602,7 @@ Write-Output "Workspace [$($workspace.WorkspaceName)] Report & Model metadata ex
         # Fetch report pages
         $pagesUrl = "$($global:PowerBIEndpoints.ApiPrefix)/v1.0/myorg/groups/$($workspace.WorkspaceId)/reports/$($report.id)/pages"
         $pages = Invoke-PowerBIRestMethod -Method GET -Url $pagesUrl | ConvertFrom-Json
-        foreach ($page in $pages.value) {
+        foreach ($page in (Get-ObjectValueCollection -InputObject $pages)) {
             $renamedPage = Rename-Properties -object $page -renameMap $pageRenameMap
             $renamedPage | Add-Member -NotePropertyName "WorkspaceId" -NotePropertyValue $workspace.WorkspaceId -Force
             $renamedPage | Add-Member -NotePropertyName "WorkspaceName" -NotePropertyValue $workspace.WorkspaceName -Force
@@ -1624,7 +1635,7 @@ $apps = Invoke-PowerBIRestMethod -Method GET -Url $appsUrl | ConvertFrom-Json
 $appReportIds = @{}
 $originalReportObjectIds = @{}
 
-foreach ($app in $apps.value) {
+foreach ($app in (Get-ObjectValueCollection -InputObject $apps)) {
     $appWorkspaceId = Get-ObjectPropertyValue -InputObject $app -Name 'workspaceId'
     if ($appWorkspaceId -and ($workspacesInfo.WorkspaceId -contains $appWorkspaceId)) {
         $renamedApp = Rename-Properties -object $app -renameMap $appRenameMap
@@ -1634,7 +1645,7 @@ foreach ($app in $apps.value) {
         $appReportsUrl = "$($global:PowerBIEndpoints.ApiPrefix)/v1.0/myorg/apps/$($app.id)/reports"
         $appReports = Invoke-PowerBIRestMethod -Method GET -Url $appReportsUrl | ConvertFrom-Json
 
-        foreach ($report in $appReports.value) {
+        foreach ($report in (Get-ObjectValueCollection -InputObject $appReports)) {
             $renamedAppReport = Rename-Properties -object $report -renameMap $appReportRenameMap
             $renamedAppReport | Add-Member -NotePropertyName "AppId" -NotePropertyValue $app.id -Force
             $renamedAppReport | Add-Member -NotePropertyName "AppName" -NotePropertyValue $app.name -Force
@@ -1659,7 +1670,7 @@ Write-Output "Workspace [$($workspace.WorkspaceName)] Model Refresh History extr
         $refreshHistoryUrl = "$($global:PowerBIEndpoints.ApiPrefix)/v1.0/myorg/groups/$($workspace.WorkspaceId)/datasets/$($dataset.DatasetId)/refreshes"
         $refreshHistoryResponse = Invoke-PowerBIRestMethod -Method GET -Url $refreshHistoryUrl | ConvertFrom-Json
 
-        foreach ($refresh in $refreshHistoryResponse.value) {
+        foreach ($refresh in (Get-ObjectValueCollection -InputObject $refreshHistoryResponse)) {
             $renamedRefreshRecord = Rename-Properties -object $refresh -renameMap $datasetRefreshRenameMap
             $renamedRefreshRecord | Add-Member -NotePropertyName "WorkspaceId" -NotePropertyValue $workspace.WorkspaceId -Force
             $renamedRefreshRecord | Add-Member -NotePropertyName "WorkspaceName" -NotePropertyValue $workspace.WorkspaceName -Force
@@ -1725,8 +1736,8 @@ Write-Output "Workspace [$($workspace.WorkspaceName)] Dataflow metadata extracti
     $dataflowsResponse = Invoke-PowerBIRestMethod -Method GET -Url $dataflowsUrl | ConvertFrom-Json
 
     # Ensure response is not null before looping
-    if ($dataflowsResponse.value) {
-        foreach ($dataflow in $dataflowsResponse.value) {
+    if ((Get-ObjectValueCollection -InputObject $dataflowsResponse)) {
+        foreach ($dataflow in (Get-ObjectValueCollection -InputObject $dataflowsResponse)) {
             $renamedDataflow = Rename-Properties -object $dataflow -renameMap $dataflowRenameMap
             $renamedDataflow | Add-Member -NotePropertyName "WorkspaceId" -NotePropertyValue $workspace.WorkspaceId -Force
             $renamedDataflow | Add-Member -NotePropertyName "WorkspaceName" -NotePropertyValue $workspace.WorkspaceName -Force
@@ -1743,8 +1754,8 @@ Write-Output "Workspace [$($workspace.WorkspaceName)] Dataflow metadata extracti
             $dataflowSourcesResponse = Invoke-PowerBIRestMethod -Method GET -Url $dataflowSourcesUrl | ConvertFrom-Json
 
             # Ensure response is not null before looping
-            if ($dataflowSourcesResponse.value) {
-                foreach ($datasource in $dataflowSourcesResponse.value) {
+            if ((Get-ObjectValueCollection -InputObject $dataflowSourcesResponse)) {
+                foreach ($datasource in (Get-ObjectValueCollection -InputObject $dataflowSourcesResponse)) {
                     $renamedDataflowDatasource = Rename-Properties -object $datasource -renameMap $dataflowDatasourceRenameMap
 
                     # Ensure required fields are included
@@ -1781,8 +1792,8 @@ Write-Output "Workspace [$($workspace.WorkspaceName)] Dataflow metadata extracti
         $fabricDataflowsResponse = Invoke-RestMethod -Uri $fabricDataflowsUrl -Headers $fabricHeaders -Method GET -ErrorAction Stop
 
         # Ensure response is not null before looping
-        if ($fabricDataflowsResponse.value) {
-            foreach ($fabricDataflow in $fabricDataflowsResponse.value) {
+        if ((Get-ObjectValueCollection -InputObject $fabricDataflowsResponse)) {
+            foreach ($fabricDataflow in (Get-ObjectValueCollection -InputObject $fabricDataflowsResponse)) {
                 # Map Fabric API response to match Power BI API structure using rename map
                 $renamedFabricDataflow = Rename-Properties -object $fabricDataflow -renameMap $fabricDataflowRenameMap
                 $renamedFabricDataflow | Add-Member -NotePropertyName "WorkspaceId" -NotePropertyValue $workspace.WorkspaceId -Force
@@ -1814,8 +1825,8 @@ foreach ($workspace in $workspacesInfo) {
         $dataflowLineageResponse = Invoke-PowerBIRestMethod -Method GET -Url $dataflowLineageUrl | ConvertFrom-Json
 
         # Ensure response is not null before looping
-        if ($dataflowLineageResponse.value) {
-            foreach ($dataflow in $dataflowLineageResponse.value) {
+        if ((Get-ObjectValueCollection -InputObject $dataflowLineageResponse)) {
+            foreach ($dataflow in (Get-ObjectValueCollection -InputObject $dataflowLineageResponse)) {
                 $renamedDataflow = Rename-Properties -object $dataflow -renameMap $dataflowLineageRenameMap
                 $renamedDataflow | Add-Member -NotePropertyName "WorkspaceId" -NotePropertyValue $workspace.WorkspaceId -Force
                 $renamedDataflow | Add-Member -NotePropertyName "WorkspaceName" -NotePropertyValue $workspace.WorkspaceName -Force
@@ -1848,8 +1859,8 @@ Write-Output "Workspace [$($workspace.WorkspaceName)] Dataflow Refresh History e
         $refreshHistoryResponse = Invoke-PowerBIRestMethod -Method GET -Url $refreshHistoryUrl | ConvertFrom-Json
 
         # Ensure response is not null before looping
-        if ($refreshHistoryResponse.value) {
-            foreach ($refresh in $refreshHistoryResponse.value) {
+        if ((Get-ObjectValueCollection -InputObject $refreshHistoryResponse)) {
+            foreach ($refresh in (Get-ObjectValueCollection -InputObject $refreshHistoryResponse)) {
                 $renamedRefreshRecord = Rename-Properties -object $refresh -renameMap $dataflowRefreshRenameMap
                 $renamedRefreshRecord | Add-Member -NotePropertyName "WorkspaceId" -NotePropertyValue $workspace.WorkspaceId -Force
                 $renamedRefreshRecord | Add-Member -NotePropertyName "WorkspaceName" -NotePropertyValue $workspace.WorkspaceName -Force
@@ -1883,7 +1894,7 @@ Write-Output "Workspace [$($workspace.WorkspaceName)] Fabric Item metadata extra
         $fabricItemsResponse = Invoke-PowerBIRestMethod -Method GET -Url $fabricItemsUrl | ConvertFrom-Json
 
 
-        $filteredItems = $fabricItemsResponse.value | Where-Object {
+        $filteredItems = (Get-ObjectValueCollection -InputObject $fabricItemsResponse) | Where-Object {
             $_.type -ne 'Report' -and $_.type -ne 'SemanticModel'
         }
 
@@ -1931,7 +1942,7 @@ if ($IncludeMyWorkspace -or ($selection -and $selection.TimedOut)) {
     # Fetch datasets from "My Workspace"
     $myWorkspaceDatasetsUrl = "$($global:PowerBIEndpoints.ApiPrefix)/v1.0/myorg/datasets"
     $myWorkspaceDatasets = Invoke-PowerBIRestMethod -Method GET -Url $myWorkspaceDatasetsUrl | ConvertFrom-Json
-    foreach ($dataset in $myWorkspaceDatasets.value) {
+    foreach ($dataset in (Get-ObjectValueCollection -InputObject $myWorkspaceDatasets)) {
         $renamedDataset = Rename-Properties -object $dataset -renameMap $datasetRenameMap
         $renamedDataset | Add-Member -NotePropertyName "WorkspaceId" -NotePropertyValue $myWorkspaceId -Force
         $renamedDataset | Add-Member -NotePropertyName "WorkspaceName" -NotePropertyValue $myWorkspaceName -Force
@@ -1940,7 +1951,7 @@ if ($IncludeMyWorkspace -or ($selection -and $selection.TimedOut)) {
 
         $datasourcesUrl = "$($global:PowerBIEndpoints.ApiPrefix)/v1.0/myorg/datasets/$($dataset.id)/datasources"
         $datasources = Invoke-PowerBIRestMethod -Method GET -Url $datasourcesUrl | ConvertFrom-Json
-        foreach ($datasource in $datasources.value) {
+        foreach ($datasource in (Get-ObjectValueCollection -InputObject $datasources)) {
             $renamedDatasource = Rename-Properties -object $datasource -renameMap $datasetDatasourceRenameMap
             $renamedDatasource | Add-Member -NotePropertyName "WorkspaceId" -NotePropertyValue $myWorkspaceId -Force
             $renamedDatasource | Add-Member -NotePropertyName "WorkspaceName" -NotePropertyValue $myWorkspaceName -Force
@@ -1959,7 +1970,7 @@ if ($IncludeMyWorkspace -or ($selection -and $selection.TimedOut)) {
     $myWorkspaceReports = Invoke-PowerBIRestMethod -Method GET -Url $myWorkspaceReportsUrl | ConvertFrom-Json
 
     $sharedReportExists = $false
-    foreach ($report in $myWorkspaceReports.value) {
+    foreach ($report in (Get-ObjectValueCollection -InputObject $myWorkspaceReports)) {
         # Skip if already captured elsewhere (workspace/app)
         if ($appReportIds.ContainsKey($report.id) -or $capturedWorkspaceReportIds.ContainsKey($report.id) -or $originalReportObjectIds.ContainsKey($report.id)) {
             continue
@@ -1994,7 +2005,7 @@ if ($IncludeMyWorkspace -or ($selection -and $selection.TimedOut)) {
 
         $pagesUrl = "$($global:PowerBIEndpoints.ApiPrefix)/v1.0/myorg/reports/$($report.id)/pages"
         $pages = Invoke-PowerBIRestMethod -Method GET -Url $pagesUrl | ConvertFrom-Json
-        foreach ($page in $pages.value) {
+        foreach ($page in (Get-ObjectValueCollection -InputObject $pages)) {
             $renamedPage = Rename-Properties -object $page -renameMap $pageRenameMap
             $renamedPage | Add-Member -NotePropertyName "WorkspaceId" -NotePropertyValue $workspaceIdValue -Force
             $renamedPage | Add-Member -NotePropertyName "WorkspaceName" -NotePropertyValue $workspaceNameValue -Force
@@ -2019,7 +2030,7 @@ if ($IncludeMyWorkspace -or ($selection -and $selection.TimedOut)) {
     foreach ($dataset in $datasetsInfo | Where-Object { $_.WorkspaceId -eq $myWorkspaceId }) {
         $refreshHistoryUrl = "$($global:PowerBIEndpoints.ApiPrefix)/v1.0/myorg/datasets/$($dataset.DatasetId)/refreshes"
         $refreshHistoryResponse = Invoke-PowerBIRestMethod -Method GET -Url $refreshHistoryUrl | ConvertFrom-Json
-        foreach ($refresh in $refreshHistoryResponse.value) {
+        foreach ($refresh in (Get-ObjectValueCollection -InputObject $refreshHistoryResponse)) {
             $renamedRefreshRecord = Rename-Properties -object $refresh -renameMap $datasetRefreshRenameMap
             $renamedRefreshRecord | Add-Member -NotePropertyName "WorkspaceId" -NotePropertyValue $myWorkspaceId -Force
             $renamedRefreshRecord | Add-Member -NotePropertyName "WorkspaceName" -NotePropertyValue $myWorkspaceName -Force
@@ -3063,10 +3074,10 @@ foreach ($workspace in $workspacesInfo) {
     $dataflows = $dataflowsResponse | ConvertFrom-Json
 
     # Check if the response is valid and contains dataflows
-    if ($dataflows -and $dataflows.value) {
+    if ($dataflows -and (Get-ObjectValueCollection -InputObject $dataflows)) {
         
         # Iterate through the Gen1 dataflows
-        foreach ($dataflow in $dataflows.value) {
+        foreach ($dataflow in (Get-ObjectValueCollection -InputObject $dataflows)) {
             $dataflowId = $dataflow.objectId
             $dataflowName = $dataflow.name
 
@@ -3185,7 +3196,7 @@ foreach ($workspace in $workspacesInfo) {
         $fabricItemsResponse = Invoke-PowerBIRestMethod -Method GET -Url $fabricItemsUrl | ConvertFrom-Json
         
         # Filter for Dataflow items (Gen2 dataflows)
-        $gen2Dataflows = $fabricItemsResponse.value | Where-Object { $_.type -eq 'Dataflow' }
+        $gen2Dataflows = (Get-ObjectValueCollection -InputObject $fabricItemsResponse) | Where-Object { $_.type -eq 'Dataflow' }
         
         if ($gen2Dataflows -and $gen2Dataflows.Count -gt 0) {
             
