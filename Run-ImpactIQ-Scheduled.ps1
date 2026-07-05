@@ -78,50 +78,47 @@ if (-not (Test-Path -Path $logsFolder)) {
 }
 $logPath = Join-Path -Path $logsFolder -ChildPath ("ImpactIQ-{0:yyyyMMdd-HHmmss}.log" -f (Get-Date))
 
-$scriptArgs = @(
-    '-BaseFolderPath', $BaseFolderPath,
-    '-LoginEnvironment', $LoginEnvironment,
-    '-RunMode', $RunMode,
-    '-NonInteractive'
-)
+$scriptParams = @{
+    BaseFolderPath   = $BaseFolderPath
+    LoginEnvironment = $LoginEnvironment
+    RunMode          = $RunMode
+    NonInteractive   = $true
+}
 
 if ($RunMode -eq 'Workspaces') {
     if ($WorkspaceIds.Count -gt 0) {
-        $scriptArgs += '-WorkspaceIds'
-        $scriptArgs += $WorkspaceIds
+        $scriptParams.WorkspaceIds = $WorkspaceIds
     }
     elseif ($AllWorkspaces) {
-        $scriptArgs += '-AllWorkspaces'
+        $scriptParams.AllWorkspaces = $true
     }
     else {
         throw "Workspaces mode needs either -WorkspaceIds or -AllWorkspaces `$true."
     }
 
     if ($IncludeMyWorkspace) {
-        $scriptArgs += '-IncludeMyWorkspace'
+        $scriptParams.IncludeMyWorkspace = $true
     }
 }
 else {
     if ($ReportIds.Count -eq 0) {
         throw "Reports mode needs -ReportIds."
     }
-    $scriptArgs += '-ReportIds'
-    $scriptArgs += $ReportIds
+    $scriptParams.ReportIds = $ReportIds
 
     if ($WorkspaceIds.Count -gt 0) {
-        $scriptArgs += '-WorkspaceIds'
-        $scriptArgs += $WorkspaceIds
+        $scriptParams.WorkspaceIds = $WorkspaceIds
     }
 }
 
 if (-not $KeepReportBackups) {
-    $scriptArgs += '-DeleteReportBackupsAfterExtraction'
+    $scriptParams.DeleteReportBackupsAfterExtraction = $true
 }
 
 Write-Host "[INFO] Starting ImpactIQ scheduled run. Log: $logPath"
 Start-Transcript -Path $logPath -Append | Out-Null
 try {
-    & $scheduledScript @scriptArgs
+    & $scheduledScript @scriptParams
 }
 finally {
     Stop-Transcript | Out-Null
