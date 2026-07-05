@@ -2465,8 +2465,14 @@ function Export-ReportDefinitionAsPbix {
 	        $cleanReportName = $cleanReportName -replace "[^a-zA-Z0-9\(\)&,.-]", " "
 	        $cleanReportName = $cleanReportName.TrimStart()
 	
-	        # Determine file extension
-	        $fileExtension = if ($report.WebUrl -like "*/rdlreports/*") { "rdl" } else { "pbix" }
+	        # Determine file extension. ReportsInfo contains renamed properties, so
+	        # prefer ReportWebUrl; fall back to WebUrl for compatibility with any
+	        # unrenamed report objects.
+	        $reportWebUrl = Get-ObjectPropertyValue -InputObject $report -Name 'ReportWebUrl'
+	        if (-not $reportWebUrl) {
+	            $reportWebUrl = Get-ObjectPropertyValue -InputObject $report -Name 'WebUrl'
+	        }
+	        $fileExtension = if ($reportWebUrl -like "*/rdlreports/*") { "rdl" } else { "pbix" }
 	        $filename = "$cleanWorkspaceName ~ $cleanReportName.$fileExtension"
 	        $filepath = Join-Path -Path $newDateFolder -ChildPath $filename
 	        $extractFolder = Join-Path -Path $tempExtractFolder -ChildPath "$cleanWorkspaceName ~ $cleanReportName"

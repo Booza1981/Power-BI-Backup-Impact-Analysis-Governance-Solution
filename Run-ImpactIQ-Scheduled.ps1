@@ -22,7 +22,10 @@ param(
     [switch]$KeepReportBackups
 )
 
-Set-StrictMode -Version Latest
+# Do not enable Set-StrictMode here. The upstream ImpactIQ script is a legacy
+# PowerShell script that intentionally tolerates absent REST/API properties as
+# $null. StrictMode is inherited by invoked scripts and turns those benign
+# missing properties into PropertyNotFoundStrict terminating errors.
 $ErrorActionPreference = 'Stop'
 
 # =============================
