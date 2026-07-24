@@ -1358,6 +1358,11 @@ else {
         $reportPickerCancelled = $false
         $runMode = Show-RunModeDialog
 
+    if ($runMode -eq 'Cancel') {
+        Write-Host "[INFO] Run cancelled by user." -ForegroundColor Yellow
+        exit
+    }
+
     if ($runMode -eq 'Reports') {
         # ---- Reports Mode: choose scope, optionally pick workspaces, then pick reports ----
         # Each sub-dialog cancel steps back ONE level (instead of bouncing all the way
@@ -1381,7 +1386,7 @@ else {
                 $scopeSelection = $null
                 $scopeCancelled = $false
                 try {
-                    $scopeSelection = Show-WorkspacePicker -Workspaces (Get-ObjectValueCollection -InputObject $workspacesResponse)
+                    $scopeSelection = Show-WorkspacePicker -Workspaces $workspacesResponse.value
                 }
                 catch {
                     $scopeCancelled = $true
@@ -1394,14 +1399,14 @@ else {
                 $scopeWorkspaceIds = @($scopeSelection.SelectedWorkspaceIds)
                 if (-not $scopeWorkspaceIds -or $scopeWorkspaceIds.Count -eq 0) {
                     Write-Warning "No workspaces selected - showing reports from ALL workspaces instead."
-                    $workspacesToScan = (Get-ObjectValueCollection -InputObject $workspacesResponse)
+                    $workspacesToScan = $workspacesResponse.value
                 } else {
-                    $workspacesToScan = @((Get-ObjectValueCollection -InputObject $workspacesResponse) | Where-Object { $scopeWorkspaceIds -contains $_.id })
+                    $workspacesToScan = @($workspacesResponse.value | Where-Object { $scopeWorkspaceIds -contains $_.id })
                 }
             }
             else {
                 # 'All' - scan every accessible workspace
-                $workspacesToScan = (Get-ObjectValueCollection -InputObject $workspacesResponse)
+                $workspacesToScan = $workspacesResponse.value
             }
 
             # ---- Fetch reports from the chosen workspaces ----
@@ -1415,14 +1420,14 @@ else {
                 $reportsUrl = "$($global:PowerBIEndpoints.ApiPrefix)/v1.0/myorg/groups/$($ws.id)/reports"
                 try {
                     $reportsResp = Invoke-PowerBIRestMethod -Method GET -Url $reportsUrl | ConvertFrom-Json
-                    foreach ($rpt in (Get-ObjectValueCollection -InputObject $reportsResp)) {
+                    foreach ($rpt in $reportsResp.value) {
                         $allReportsForPicker += [pscustomobject]@{
                             ReportId           = $rpt.id
                             ReportName         = $rpt.name
                             WorkspaceId        = $ws.id
                             WorkspaceName      = $ws.name
-                            DatasetId          = Get-ObjectPropertyValue -InputObject $rpt -Name 'datasetId'
-                            DatasetWorkspaceId = Get-ObjectPropertyValue -InputObject $rpt -Name 'datasetWorkspaceId'
+                            DatasetId          = $rpt.datasetId
+                            DatasetWorkspaceId = $rpt.datasetWorkspaceId
                         }
                     }
                 } catch { }
@@ -1468,7 +1473,7 @@ else {
             $neededWorkspaceIds = $neededWorkspaceIds | Select-Object -Unique
 
             # Build workspacesInfo from needed workspaces
-            foreach ($workspace in (Get-ObjectValueCollection -InputObject $workspacesResponse)) {
+            foreach ($workspace in $workspacesResponse.value) {
                 if ($neededWorkspaceIds -notcontains $workspace.id) { continue }
                 $workspacesInfo += Rename-Properties -object $workspace -renameMap $workspaceRenameMap
             }
@@ -1486,39 +1491,193 @@ else {
         # If the user backed all the way out, re-show the run-mode selector
         if ($reportPickerCancelled) { continue }
 
+    } elseif ($runMode -eq 'Models') {
+        # ---- Models Mode: choose scope, optionally pick workspaces, then pick models ----
+        # Reports that use the selected models are automatically included.
+        $modelSelectionComplete = $false
+        while (-not $modelSelectionComplete) {
+
+            $modelScope = Show-ModelScopeDialog
+
+            if ($modelScope -eq 'Cancel') {
+                Write-Host "[INFO] Model scope selection cancelled. Returning to run mode selection..."
+                $reportPickerCancelled = $true
+                break
+            }
+
+            # Decide which workspaces to scan for models
+            $workspacesToScan = $null
+            if ($modelScope -eq 'Specific') {
+                $scopeSelection = $null
+                $scopeCancelled = $false
+                try {
+                    $scopeSelection = Show-WorkspacePicker -Workspaces $workspacesResponse.value
+                }
+                catch {
+                    $scopeCancelled = $true
+                }
+                if ($scopeCancelled) {
+                    Write-Host "[INFO] Workspace selection cancelled. Returning to model scope selection..."
+                    continue
+                }
+
+                $scopeWorkspaceIds = @($scopeSelection.SelectedWorkspaceIds)
+                if (-not $scopeWorkspaceIds -or $scopeWorkspaceIds.Count -eq 0) {
+                    Write-Warning "No workspaces selected - showing models from ALL workspaces instead."
+                    $workspacesToScan = $workspacesResponse.value
+                } else {
+                    $workspacesToScan = @($workspacesResponse.value | Where-Object { $scopeWorkspaceIds -contains $_.id })
+                }
+            }
+            else {
+                # 'All' - scan every accessible workspace
+                $workspacesToScan = $workspacesResponse.value
+            }
+
+            # ---- Fetch models (datasets) from the chosen workspaces ----
+            Write-Host "[INFO] Fetching models for selection..."
+            $allModelsForPicker = @()
+            $wsCount = 0
+            $wsTotal = @($workspacesToScan).Count
+            foreach ($ws in $workspacesToScan) {
+                $wsCount++
+                Write-Host "`r[INFO] Scanning workspace $wsCount of $($wsTotal): $($ws.name)" -NoNewline
+                $datasetsUrl = "$($global:PowerBIEndpoints.ApiPrefix)/v1.0/myorg/groups/$($ws.id)/datasets"
+                try {
+                    $datasetsResp = Invoke-PowerBIRestMethod -Method GET -Url $datasetsUrl | ConvertFrom-Json
+                    foreach ($ds in $datasetsResp.value) {
+                        $allModelsForPicker += [pscustomobject]@{
+                            DatasetId     = $ds.id
+                            DatasetName   = $ds.name
+                            WorkspaceId   = $ws.id
+                            WorkspaceName = $ws.name
+                        }
+                    }
+                } catch { }
+            }
+            Write-Host ""
+            Write-Host "[INFO] Found $($allModelsForPicker.Count) models across $($wsTotal) workspace(s)."
+
+            if ($allModelsForPicker.Count -eq 0) {
+                Write-Warning "No models found in the selected workspace(s). Returning to model scope selection..."
+                continue
+            }
+
+            # ---- Show model picker ----
+            $selectedModels = Show-ModelPicker -Models $allModelsForPicker
+
+            if ($null -eq $selectedModels) {
+                Write-Host "[INFO] Model selection cancelled. Returning to model scope selection..."
+                continue
+            }
+
+            if ($selectedModels.Count -eq 0) {
+                Write-Warning "No models selected. Returning to model scope selection..."
+                continue
+            }
+
+            # Build the selected dataset IDs set
+            $global:SelectedDatasetIds = @{}
+            foreach ($mdl in $selectedModels) {
+                $global:SelectedDatasetIds[$mdl.DatasetId] = $true
+            }
+
+            # Now fetch reports from ALL workspaces to find which ones use the selected models
+            Write-Host "[INFO] Scanning all workspaces for reports connected to the selected model(s)..."
+            $global:SelectedReportIds = @{}
+            $neededWorkspaceIds = @()
+
+            # Include the model workspaces themselves
+            foreach ($mdl in $selectedModels) {
+                $neededWorkspaceIds += $mdl.WorkspaceId
+            }
+
+            $wsCount = 0
+            $wsTotal = @($workspacesResponse.value).Count
+            foreach ($ws in $workspacesResponse.value) {
+                $wsCount++
+                Write-Host "`r[INFO] Scanning workspace $wsCount of $($wsTotal): $($ws.name)" -NoNewline
+                $reportsUrl = "$($global:PowerBIEndpoints.ApiPrefix)/v1.0/myorg/groups/$($ws.id)/reports"
+                try {
+                    $reportsResp = Invoke-PowerBIRestMethod -Method GET -Url $reportsUrl | ConvertFrom-Json
+                    foreach ($rpt in $reportsResp.value) {
+                        if ($rpt.datasetId -and $global:SelectedDatasetIds.ContainsKey($rpt.datasetId)) {
+                            $global:SelectedReportIds[$rpt.id] = $true
+                            $neededWorkspaceIds += $ws.id
+                        }
+                    }
+                } catch { }
+            }
+            Write-Host ""
+            $neededWorkspaceIds = $neededWorkspaceIds | Select-Object -Unique
+
+            Write-Host "[INFO] Found $($global:SelectedReportIds.Count) report(s) connected to $($selectedModels.Count) selected model(s)."
+
+            # Build workspacesInfo from needed workspaces
+            foreach ($workspace in $workspacesResponse.value) {
+                if ($neededWorkspaceIds -notcontains $workspace.id) { continue }
+                $workspacesInfo += Rename-Properties -object $workspace -renameMap $workspaceRenameMap
+            }
+
+            if ($workspacesInfo.Count -eq 0) {
+                Write-Warning "No accessible workspaces found for the selected models. Returning to model scope selection..."
+                continue
+            }
+
+            $IncludeMyWorkspace = $false
+            $global:RunMode = 'Models'
+            $modelSelectionComplete = $true
+        } # end inner while (model selection)
+
+        # If the user backed all the way out, re-show the run-mode selector
+        if ($reportPickerCancelled) { continue }
+
     } else {
         # ---- Workspaces Mode: existing behavior ----
         $global:RunMode = 'Workspaces'
 
-        try {
-            $selection = Show-WorkspacePicker -Workspaces (Get-ObjectValueCollection -InputObject $workspacesResponse)
-        }
-        catch {
-            Write-Warning "WinForms not available. Defaulting to ALL workspaces and INCLUDING My Workspace."
-            $selection = [pscustomobject]@{
-                SelectedWorkspaceIds = (Get-ObjectValueCollection -InputObject $workspacesResponse).id
-                IncludeMyWorkspace   = $true
+        $workspaceSelectionDone = $false
+        while (-not $workspaceSelectionDone) {
+            $selection = $null
+            $selectionCancelled = $false
+            try {
+                $selection = Show-WorkspacePicker -Workspaces $workspacesResponse.value
             }
+            catch {
+                $selectionCancelled = $true
+            }
+
+            if ($selectionCancelled) {
+                # User cancelled workspace picker - go back to run mode selector
+                Write-Host "[INFO] Workspace selection cancelled. Returning to run mode selection..."
+                $reportPickerCancelled = $true
+                break
+            }
+
+            # Build filtered workspaces
+            $selectedWorkspaceIds = @($selection.SelectedWorkspaceIds)
+
+            if (-not $selectedWorkspaceIds -or $selectedWorkspaceIds.Count -eq 0) {
+                Write-Warning "No workspaces selected. Please select at least one workspace."
+                continue
+            }
+
+            foreach ($workspace in $workspacesResponse.value) {
+                if ($selectedWorkspaceIds -notcontains $workspace.id) { continue }
+                $workspacesInfo += Rename-Properties -object $workspace -renameMap $workspaceRenameMap
+            }
+
+            # Flag for later "My Workspace" section
+            $IncludeMyWorkspace = $selection.IncludeMyWorkspace
+            $workspaceSelectionDone = $true
         }
 
-        # Build filtered workspaces
-        $selectedWorkspaceIds = @($selection.SelectedWorkspaceIds)
-
-        if (-not $selectedWorkspaceIds -or $selectedWorkspaceIds.Count -eq 0) {
-            throw "No workspaces selected."
-        }
-
-        foreach ($workspace in (Get-ObjectValueCollection -InputObject $workspacesResponse)) {
-            if ($selectedWorkspaceIds -notcontains $workspace.id) { continue }
-            $workspacesInfo += Rename-Properties -object $workspace -renameMap $workspaceRenameMap
-        }
-
-        # Flag for later "My Workspace" section
-        $IncludeMyWorkspace = $selection.IncludeMyWorkspace
+        if ($reportPickerCancelled) { continue }
     }
     } # end while (reportPickerCancelled)
-}
 
+
+}
 # Initialize collections for all necessary information
 $fabricItemsInfo = @()
 $datasetsInfo = @()
