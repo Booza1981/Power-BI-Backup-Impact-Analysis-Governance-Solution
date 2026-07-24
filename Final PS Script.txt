@@ -1,6 +1,23 @@
 # Define the base folder and script paths at the beginning of the script
 
-$global:BaseFolderPath = "C:\Power BI Backups"
+param(
+    [string]$BaseFolderPath = "C:\Power BI Backups",
+    [string]$LoginEnvironment = '',
+    [ValidateSet('Workspaces', 'Reports')]
+    [string]$RunMode = 'Workspaces',
+    [string[]]$WorkspaceIds = @(),
+    [string[]]$ReportIds = @(),
+    [switch]$AllWorkspaces,
+    [switch]$IncludeMyWorkspace,
+    [switch]$DeleteReportBackupsAfterExtraction,
+    [switch]$NonInteractive
+)
+
+if ($NonInteractive -and [string]::IsNullOrWhiteSpace($LoginEnvironment)) {
+    $LoginEnvironment = 'Public'
+}
+
+$global:BaseFolderPath = $BaseFolderPath
 $global:ConfigFolder   = Join-Path $global:BaseFolderPath "Config"
 
 $baseFolderPath = $global:BaseFolderPath
@@ -339,7 +356,7 @@ function Show-EnvironmentSelectionDialog {
 # ============================================
 # Prompt for Power BI Environment + Validation
 # ============================================
-if (-not (Get-Variable -Name LoginEnvironment -Scope Script -ErrorAction SilentlyContinue)) {
+if ([string]::IsNullOrWhiteSpace($LoginEnvironment)) {
 
     $selectedEnv = Show-EnvironmentSelectionDialog -TimeoutSeconds 60
 
@@ -368,6 +385,13 @@ if (-not (Get-Variable -Name LoginEnvironment -Scope Script -ErrorAction Silentl
         
         Write-Host "[INFO] Selected environment: $LoginEnvironment" -ForegroundColor Green
     }
+}
+else {
+    $validLoginEnvironments = @('Public', 'Germany', 'USGov', 'China', 'USGovHigh', 'USGovMil')
+    if ($validLoginEnvironments -notcontains $LoginEnvironment) {
+        throw "Invalid LoginEnvironment '$LoginEnvironment'. Use one of: $($validLoginEnvironments -join ', ')"
+    }
+    Write-Host "[INFO] Selected environment from parameter: $LoginEnvironment" -ForegroundColor Green
 }
 
 # If explicitly 'Public', set to $null for Connect-PowerBIServiceAccount default
@@ -566,6 +590,37 @@ function Rename-Properties {
         }
     }
     return $newObject
+}
+
+function Get-ObjectPropertyValue {
+    param(
+        $InputObject,
+        [Parameter(Mandatory)]
+        [string]$Name,
+        $Default = $null
+    )
+
+    if ($null -eq $InputObject) {
+        return $Default
+    }
+
+    $property = $InputObject.PSObject.Properties[$Name]
+    if ($null -ne $property) {
+        return $property.Value
+    }
+
+    return $Default
+}
+
+function Get-ObjectValueCollection {
+    param($InputObject)
+
+    $value = Get-ObjectPropertyValue -InputObject $InputObject -Name 'value'
+    if ($null -eq $value) {
+        return @()
+    }
+
+    return @($value)
 }
 
 function Show-WorkspacePicker {
@@ -1189,60 +1244,37 @@ $workspacesUrl = "$($global:PowerBIEndpoints.ApiPrefix)/v1.0/myorg/groups"
 $workspacesResponse = Invoke-PowerBIRestMethod -Method GET -Url $workspacesUrl | ConvertFrom-Json
 $workspacesInfo = @()
 
-# --- Show Run Mode Dialog (loop back on Cancel from report picker) ---
-$reportPickerCancelled = $true
-while ($reportPickerCancelled) {
-    $reportPickerCancelled = $false
-    $runMode = Show-RunModeDialog
+# --- Select run scope (interactive dialogs by default; parameter-driven for scheduled runs) ---
+$selection = $null
 
-if ($runMode -eq 'Reports') {
-    # ---- Reports Mode: choose scope, optionally pick workspaces, then pick reports ----
-    # Each sub-dialog cancel steps back ONE level (instead of bouncing all the way
-    # out, which previously looked like an infinite loop).
-    $reportSelectionComplete = $false
-    while (-not $reportSelectionComplete) {
+if ($NonInteractive) {
+    Write-Host "[INFO] Running in non-interactive scheduled mode. RunMode: $RunMode"
+    $global:RunMode = $RunMode
 
-        $reportScope = Show-ReportScopeDialog
-
-        if ($reportScope -eq 'Cancel') {
-            # Step all the way back to the run-mode selector
-            Write-Host "[INFO] Report scope selection cancelled. Returning to run mode selection..."
-            $reportPickerCancelled = $true
-            break
+    if ($RunMode -eq 'Reports') {
+        if (-not $ReportIds -or $ReportIds.Count -eq 0) {
+            throw "NonInteractive Reports mode requires -ReportIds."
         }
 
-        # Decide which workspaces to scan for reports
-        $workspacesToScan = $null
-        if ($reportScope -eq 'Specific') {
-            # Pop the workspace chooser; Cancel returns to the scope question
-            $scopeSelection = $null
-            $scopeCancelled = $false
-            try {
-                $scopeSelection = Show-WorkspacePicker -Workspaces $workspacesResponse.value
-            }
-            catch {
-                $scopeCancelled = $true
-            }
-            if ($scopeCancelled) {
-                Write-Host "[INFO] Workspace selection cancelled. Returning to report scope selection..."
-                continue
-            }
-
-            $scopeWorkspaceIds = @($scopeSelection.SelectedWorkspaceIds)
-            if (-not $scopeWorkspaceIds -or $scopeWorkspaceIds.Count -eq 0) {
-                Write-Warning "No workspaces selected - showing reports from ALL workspaces instead."
-                $workspacesToScan = $workspacesResponse.value
-            } else {
-                $workspacesToScan = @($workspacesResponse.value | Where-Object { $scopeWorkspaceIds -contains $_.id })
+        $global:SelectedReportIds  = @{}
+        $global:SelectedDatasetIds = @{}
+        foreach ($reportId in $ReportIds) {
+            if (-not [string]::IsNullOrWhiteSpace($reportId)) {
+                $global:SelectedReportIds[$reportId] = $true
             }
         }
-        else {
-            # 'All' - scan every accessible workspace
-            $workspacesToScan = $workspacesResponse.value
+
+        $workspacesToScan = if ($WorkspaceIds -and $WorkspaceIds.Count -gt 0) {
+            @((Get-ObjectValueCollection -InputObject $workspacesResponse) | Where-Object { $WorkspaceIds -contains $_.id })
+        } else {
+            @((Get-ObjectValueCollection -InputObject $workspacesResponse))
         }
 
-        # ---- Fetch reports from the chosen workspaces ----
-        Write-Host "[INFO] Fetching reports for selection..."
+        if (-not $workspacesToScan -or $workspacesToScan.Count -eq 0) {
+            throw "NonInteractive Reports mode found no accessible workspaces to scan. Check -WorkspaceIds or Power BI permissions."
+        }
+
+        Write-Host "[INFO] Fetching reports for configured ReportIds..."
         $allReportsForPicker = @()
         $wsCount = 0
         $wsTotal = @($workspacesToScan).Count
@@ -1252,51 +1284,31 @@ if ($runMode -eq 'Reports') {
             $reportsUrl = "$($global:PowerBIEndpoints.ApiPrefix)/v1.0/myorg/groups/$($ws.id)/reports"
             try {
                 $reportsResp = Invoke-PowerBIRestMethod -Method GET -Url $reportsUrl | ConvertFrom-Json
-                foreach ($rpt in $reportsResp.value) {
+                foreach ($rpt in (Get-ObjectValueCollection -InputObject $reportsResp)) {
                     $allReportsForPicker += [pscustomobject]@{
                         ReportId           = $rpt.id
                         ReportName         = $rpt.name
                         WorkspaceId        = $ws.id
                         WorkspaceName      = $ws.name
-                        DatasetId          = $rpt.datasetId
-                        DatasetWorkspaceId = $rpt.datasetWorkspaceId
+                        DatasetId          = Get-ObjectPropertyValue -InputObject $rpt -Name 'datasetId'
+                        DatasetWorkspaceId = Get-ObjectPropertyValue -InputObject $rpt -Name 'datasetWorkspaceId'
                     }
                 }
             } catch { }
         }
         Write-Host ""
-        Write-Host "[INFO] Found $($allReportsForPicker.Count) reports across $($wsTotal) workspace(s)."
 
-        if ($allReportsForPicker.Count -eq 0) {
-            Write-Warning "No reports found in the selected workspace(s). Returning to report scope selection..."
-            continue
+        $selectedReports = @($allReportsForPicker | Where-Object { $global:SelectedReportIds.ContainsKey($_.ReportId) })
+        $foundReportIds = @($selectedReports | ForEach-Object { $_.ReportId })
+        $missingReportIds = @($ReportIds | Where-Object { $foundReportIds -notcontains $_ })
+        if ($missingReportIds.Count -gt 0) {
+            throw "Configured ReportIds were not found in accessible workspaces: $($missingReportIds -join ', ')"
         }
 
-        # ---- Show report picker ----
-        $selectedReports = Show-ReportPicker -Reports $allReportsForPicker
-
-        if ($null -eq $selectedReports) {
-            # User cancelled the report picker - back to the scope question
-            Write-Host "[INFO] Report selection cancelled. Returning to report scope selection..."
-            continue
-        }
-
-        if ($selectedReports.Count -eq 0) {
-            Write-Warning "No reports selected. Returning to report scope selection..."
-            continue
-        }
-
-        # Determine workspace IDs needed: report workspaces + dataset workspaces for connected models
         $neededWorkspaceIds = @()
-        $global:SelectedReportIds  = @{}
-        $global:SelectedDatasetIds = @{}
-
         foreach ($rpt in $selectedReports) {
-            $global:SelectedReportIds[$rpt.ReportId] = $true
             if ($rpt.WorkspaceId)  { $neededWorkspaceIds += $rpt.WorkspaceId }
             if ($rpt.DatasetId)    { $global:SelectedDatasetIds[$rpt.DatasetId] = $true }
-
-            # If the dataset lives in a different workspace, include that workspace too
             if ($rpt.DatasetWorkspaceId -and $rpt.DatasetWorkspaceId -ne $rpt.WorkspaceId) {
                 $neededWorkspaceIds += $rpt.DatasetWorkspaceId
                 Write-Host "[INFO] Report '$($rpt.ReportName)' uses a remote model in workspace $($rpt.DatasetWorkspaceId) - including that workspace."
@@ -1304,58 +1316,368 @@ if ($runMode -eq 'Reports') {
         }
         $neededWorkspaceIds = $neededWorkspaceIds | Select-Object -Unique
 
-        # Build workspacesInfo from needed workspaces
-        foreach ($workspace in $workspacesResponse.value) {
+        foreach ($workspace in (Get-ObjectValueCollection -InputObject $workspacesResponse)) {
             if ($neededWorkspaceIds -notcontains $workspace.id) { continue }
             $workspacesInfo += Rename-Properties -object $workspace -renameMap $workspaceRenameMap
         }
 
         if ($workspacesInfo.Count -eq 0) {
-            Write-Warning "No accessible workspaces found for the selected reports. Returning to report scope selection..."
-            continue
+            throw "No accessible workspaces found for the configured ReportIds."
         }
 
         $IncludeMyWorkspace = $false
-        $global:RunMode = 'Reports'
-        $reportSelectionComplete = $true
-    } # end inner while (report selection)
-
-    # If the user backed all the way out, re-show the run-mode selector
-    if ($reportPickerCancelled) { continue }
-
-} else {
-    # ---- Workspaces Mode: existing behavior ----
-    $global:RunMode = 'Workspaces'
-
-    try {
-        $selection = Show-WorkspacePicker -Workspaces $workspacesResponse.value
+        Write-Host "[INFO] Configured report scope: $($selectedReports.Count) report(s), $($workspacesInfo.Count) workspace(s)."
     }
-    catch {
-        Write-Warning "WinForms not available. Defaulting to ALL workspaces and INCLUDING My Workspace."
-        $selection = [pscustomobject]@{
-            SelectedWorkspaceIds = $workspacesResponse.value.id
-            IncludeMyWorkspace   = $true
+    else {
+        if ($WorkspaceIds -and $WorkspaceIds.Count -gt 0) {
+            $selectedWorkspaceIds = @($WorkspaceIds)
         }
+        elseif ($AllWorkspaces) {
+            $selectedWorkspaceIds = @((Get-ObjectValueCollection -InputObject $workspacesResponse).id)
+        }
+        else {
+            throw "NonInteractive Workspaces mode requires -WorkspaceIds or -AllWorkspaces."
+        }
+
+        foreach ($workspace in (Get-ObjectValueCollection -InputObject $workspacesResponse)) {
+            if ($selectedWorkspaceIds -notcontains $workspace.id) { continue }
+            $workspacesInfo += Rename-Properties -object $workspace -renameMap $workspaceRenameMap
+        }
+
+        if ($workspacesInfo.Count -eq 0) {
+            throw "No accessible workspaces matched the configured -WorkspaceIds."
+        }
+
+        Write-Host "[INFO] Configured workspace scope: $($workspacesInfo.Count) workspace(s). IncludeMyWorkspace: $IncludeMyWorkspace"
     }
-
-    # Build filtered workspaces
-    $selectedWorkspaceIds = @($selection.SelectedWorkspaceIds)
-
-    if (-not $selectedWorkspaceIds -or $selectedWorkspaceIds.Count -eq 0) {
-        throw "No workspaces selected."
-    }
-
-    foreach ($workspace in $workspacesResponse.value) {
-        if ($selectedWorkspaceIds -notcontains $workspace.id) { continue }
-        $workspacesInfo += Rename-Properties -object $workspace -renameMap $workspaceRenameMap
-    }
-
-    # Flag for later "My Workspace" section
-    $IncludeMyWorkspace = $selection.IncludeMyWorkspace
 }
-} # end while (reportPickerCancelled)
+else {
+    # --- Show Run Mode Dialog (loop back on Cancel from report picker) ---
+    $reportPickerCancelled = $true
+    while ($reportPickerCancelled) {
+        $reportPickerCancelled = $false
+        $runMode = Show-RunModeDialog
+
+    if ($runMode -eq 'Cancel') {
+        Write-Host "[INFO] Run cancelled by user." -ForegroundColor Yellow
+        exit
+    }
+
+    if ($runMode -eq 'Reports') {
+        # ---- Reports Mode: choose scope, optionally pick workspaces, then pick reports ----
+        # Each sub-dialog cancel steps back ONE level (instead of bouncing all the way
+        # out, which previously looked like an infinite loop).
+        $reportSelectionComplete = $false
+        while (-not $reportSelectionComplete) {
+
+            $reportScope = Show-ReportScopeDialog
+
+            if ($reportScope -eq 'Cancel') {
+                # Step all the way back to the run-mode selector
+                Write-Host "[INFO] Report scope selection cancelled. Returning to run mode selection..."
+                $reportPickerCancelled = $true
+                break
+            }
+
+            # Decide which workspaces to scan for reports
+            $workspacesToScan = $null
+            if ($reportScope -eq 'Specific') {
+                # Pop the workspace chooser; Cancel returns to the scope question
+                $scopeSelection = $null
+                $scopeCancelled = $false
+                try {
+                    $scopeSelection = Show-WorkspacePicker -Workspaces $workspacesResponse.value
+                }
+                catch {
+                    $scopeCancelled = $true
+                }
+                if ($scopeCancelled) {
+                    Write-Host "[INFO] Workspace selection cancelled. Returning to report scope selection..."
+                    continue
+                }
+
+                $scopeWorkspaceIds = @($scopeSelection.SelectedWorkspaceIds)
+                if (-not $scopeWorkspaceIds -or $scopeWorkspaceIds.Count -eq 0) {
+                    Write-Warning "No workspaces selected - showing reports from ALL workspaces instead."
+                    $workspacesToScan = $workspacesResponse.value
+                } else {
+                    $workspacesToScan = @($workspacesResponse.value | Where-Object { $scopeWorkspaceIds -contains $_.id })
+                }
+            }
+            else {
+                # 'All' - scan every accessible workspace
+                $workspacesToScan = $workspacesResponse.value
+            }
+
+            # ---- Fetch reports from the chosen workspaces ----
+            Write-Host "[INFO] Fetching reports for selection..."
+            $allReportsForPicker = @()
+            $wsCount = 0
+            $wsTotal = @($workspacesToScan).Count
+            foreach ($ws in $workspacesToScan) {
+                $wsCount++
+                Write-Host "`r[INFO] Scanning workspace $wsCount of $($wsTotal): $($ws.name)" -NoNewline
+                $reportsUrl = "$($global:PowerBIEndpoints.ApiPrefix)/v1.0/myorg/groups/$($ws.id)/reports"
+                try {
+                    $reportsResp = Invoke-PowerBIRestMethod -Method GET -Url $reportsUrl | ConvertFrom-Json
+                    foreach ($rpt in $reportsResp.value) {
+                        $allReportsForPicker += [pscustomobject]@{
+                            ReportId           = $rpt.id
+                            ReportName         = $rpt.name
+                            WorkspaceId        = $ws.id
+                            WorkspaceName      = $ws.name
+                            DatasetId          = $rpt.datasetId
+                            DatasetWorkspaceId = $rpt.datasetWorkspaceId
+                        }
+                    }
+                } catch { }
+            }
+            Write-Host ""
+            Write-Host "[INFO] Found $($allReportsForPicker.Count) reports across $($wsTotal) workspace(s)."
+
+            if ($allReportsForPicker.Count -eq 0) {
+                Write-Warning "No reports found in the selected workspace(s). Returning to report scope selection..."
+                continue
+            }
+
+            # ---- Show report picker ----
+            $selectedReports = Show-ReportPicker -Reports $allReportsForPicker
+
+            if ($null -eq $selectedReports) {
+                # User cancelled the report picker - back to the scope question
+                Write-Host "[INFO] Report selection cancelled. Returning to report scope selection..."
+                continue
+            }
+
+            if ($selectedReports.Count -eq 0) {
+                Write-Warning "No reports selected. Returning to report scope selection..."
+                continue
+            }
+
+            # Determine workspace IDs needed: report workspaces + dataset workspaces for connected models
+            $neededWorkspaceIds = @()
+            $global:SelectedReportIds  = @{}
+            $global:SelectedDatasetIds = @{}
+
+            foreach ($rpt in $selectedReports) {
+                $global:SelectedReportIds[$rpt.ReportId] = $true
+                if ($rpt.WorkspaceId)  { $neededWorkspaceIds += $rpt.WorkspaceId }
+                if ($rpt.DatasetId)    { $global:SelectedDatasetIds[$rpt.DatasetId] = $true }
+
+                # If the dataset lives in a different workspace, include that workspace too
+                if ($rpt.DatasetWorkspaceId -and $rpt.DatasetWorkspaceId -ne $rpt.WorkspaceId) {
+                    $neededWorkspaceIds += $rpt.DatasetWorkspaceId
+                    Write-Host "[INFO] Report '$($rpt.ReportName)' uses a remote model in workspace $($rpt.DatasetWorkspaceId) - including that workspace."
+                }
+            }
+            $neededWorkspaceIds = $neededWorkspaceIds | Select-Object -Unique
+
+            # Build workspacesInfo from needed workspaces
+            foreach ($workspace in $workspacesResponse.value) {
+                if ($neededWorkspaceIds -notcontains $workspace.id) { continue }
+                $workspacesInfo += Rename-Properties -object $workspace -renameMap $workspaceRenameMap
+            }
+
+            if ($workspacesInfo.Count -eq 0) {
+                Write-Warning "No accessible workspaces found for the selected reports. Returning to report scope selection..."
+                continue
+            }
+
+            $IncludeMyWorkspace = $false
+            $global:RunMode = 'Reports'
+            $reportSelectionComplete = $true
+        } # end inner while (report selection)
+
+        # If the user backed all the way out, re-show the run-mode selector
+        if ($reportPickerCancelled) { continue }
+
+    } elseif ($runMode -eq 'Models') {
+        # ---- Models Mode: choose scope, optionally pick workspaces, then pick models ----
+        # Reports that use the selected models are automatically included.
+        $modelSelectionComplete = $false
+        while (-not $modelSelectionComplete) {
+
+            $modelScope = Show-ModelScopeDialog
+
+            if ($modelScope -eq 'Cancel') {
+                Write-Host "[INFO] Model scope selection cancelled. Returning to run mode selection..."
+                $reportPickerCancelled = $true
+                break
+            }
+
+            # Decide which workspaces to scan for models
+            $workspacesToScan = $null
+            if ($modelScope -eq 'Specific') {
+                $scopeSelection = $null
+                $scopeCancelled = $false
+                try {
+                    $scopeSelection = Show-WorkspacePicker -Workspaces $workspacesResponse.value
+                }
+                catch {
+                    $scopeCancelled = $true
+                }
+                if ($scopeCancelled) {
+                    Write-Host "[INFO] Workspace selection cancelled. Returning to model scope selection..."
+                    continue
+                }
+
+                $scopeWorkspaceIds = @($scopeSelection.SelectedWorkspaceIds)
+                if (-not $scopeWorkspaceIds -or $scopeWorkspaceIds.Count -eq 0) {
+                    Write-Warning "No workspaces selected - showing models from ALL workspaces instead."
+                    $workspacesToScan = $workspacesResponse.value
+                } else {
+                    $workspacesToScan = @($workspacesResponse.value | Where-Object { $scopeWorkspaceIds -contains $_.id })
+                }
+            }
+            else {
+                # 'All' - scan every accessible workspace
+                $workspacesToScan = $workspacesResponse.value
+            }
+
+            # ---- Fetch models (datasets) from the chosen workspaces ----
+            Write-Host "[INFO] Fetching models for selection..."
+            $allModelsForPicker = @()
+            $wsCount = 0
+            $wsTotal = @($workspacesToScan).Count
+            foreach ($ws in $workspacesToScan) {
+                $wsCount++
+                Write-Host "`r[INFO] Scanning workspace $wsCount of $($wsTotal): $($ws.name)" -NoNewline
+                $datasetsUrl = "$($global:PowerBIEndpoints.ApiPrefix)/v1.0/myorg/groups/$($ws.id)/datasets"
+                try {
+                    $datasetsResp = Invoke-PowerBIRestMethod -Method GET -Url $datasetsUrl | ConvertFrom-Json
+                    foreach ($ds in $datasetsResp.value) {
+                        $allModelsForPicker += [pscustomobject]@{
+                            DatasetId     = $ds.id
+                            DatasetName   = $ds.name
+                            WorkspaceId   = $ws.id
+                            WorkspaceName = $ws.name
+                        }
+                    }
+                } catch { }
+            }
+            Write-Host ""
+            Write-Host "[INFO] Found $($allModelsForPicker.Count) models across $($wsTotal) workspace(s)."
+
+            if ($allModelsForPicker.Count -eq 0) {
+                Write-Warning "No models found in the selected workspace(s). Returning to model scope selection..."
+                continue
+            }
+
+            # ---- Show model picker ----
+            $selectedModels = Show-ModelPicker -Models $allModelsForPicker
+
+            if ($null -eq $selectedModels) {
+                Write-Host "[INFO] Model selection cancelled. Returning to model scope selection..."
+                continue
+            }
+
+            if ($selectedModels.Count -eq 0) {
+                Write-Warning "No models selected. Returning to model scope selection..."
+                continue
+            }
+
+            # Build the selected dataset IDs set
+            $global:SelectedDatasetIds = @{}
+            foreach ($mdl in $selectedModels) {
+                $global:SelectedDatasetIds[$mdl.DatasetId] = $true
+            }
+
+            # Now fetch reports from ALL workspaces to find which ones use the selected models
+            Write-Host "[INFO] Scanning all workspaces for reports connected to the selected model(s)..."
+            $global:SelectedReportIds = @{}
+            $neededWorkspaceIds = @()
+
+            # Include the model workspaces themselves
+            foreach ($mdl in $selectedModels) {
+                $neededWorkspaceIds += $mdl.WorkspaceId
+            }
+
+            $wsCount = 0
+            $wsTotal = @($workspacesResponse.value).Count
+            foreach ($ws in $workspacesResponse.value) {
+                $wsCount++
+                Write-Host "`r[INFO] Scanning workspace $wsCount of $($wsTotal): $($ws.name)" -NoNewline
+                $reportsUrl = "$($global:PowerBIEndpoints.ApiPrefix)/v1.0/myorg/groups/$($ws.id)/reports"
+                try {
+                    $reportsResp = Invoke-PowerBIRestMethod -Method GET -Url $reportsUrl | ConvertFrom-Json
+                    foreach ($rpt in $reportsResp.value) {
+                        if ($rpt.datasetId -and $global:SelectedDatasetIds.ContainsKey($rpt.datasetId)) {
+                            $global:SelectedReportIds[$rpt.id] = $true
+                            $neededWorkspaceIds += $ws.id
+                        }
+                    }
+                } catch { }
+            }
+            Write-Host ""
+            $neededWorkspaceIds = $neededWorkspaceIds | Select-Object -Unique
+
+            Write-Host "[INFO] Found $($global:SelectedReportIds.Count) report(s) connected to $($selectedModels.Count) selected model(s)."
+
+            # Build workspacesInfo from needed workspaces
+            foreach ($workspace in $workspacesResponse.value) {
+                if ($neededWorkspaceIds -notcontains $workspace.id) { continue }
+                $workspacesInfo += Rename-Properties -object $workspace -renameMap $workspaceRenameMap
+            }
+
+            if ($workspacesInfo.Count -eq 0) {
+                Write-Warning "No accessible workspaces found for the selected models. Returning to model scope selection..."
+                continue
+            }
+
+            $IncludeMyWorkspace = $false
+            $global:RunMode = 'Models'
+            $modelSelectionComplete = $true
+        } # end inner while (model selection)
+
+        # If the user backed all the way out, re-show the run-mode selector
+        if ($reportPickerCancelled) { continue }
+
+    } else {
+        # ---- Workspaces Mode: existing behavior ----
+        $global:RunMode = 'Workspaces'
+
+        $workspaceSelectionDone = $false
+        while (-not $workspaceSelectionDone) {
+            $selection = $null
+            $selectionCancelled = $false
+            try {
+                $selection = Show-WorkspacePicker -Workspaces $workspacesResponse.value
+            }
+            catch {
+                $selectionCancelled = $true
+            }
+
+            if ($selectionCancelled) {
+                # User cancelled workspace picker - go back to run mode selector
+                Write-Host "[INFO] Workspace selection cancelled. Returning to run mode selection..."
+                $reportPickerCancelled = $true
+                break
+            }
+
+            # Build filtered workspaces
+            $selectedWorkspaceIds = @($selection.SelectedWorkspaceIds)
+
+            if (-not $selectedWorkspaceIds -or $selectedWorkspaceIds.Count -eq 0) {
+                Write-Warning "No workspaces selected. Please select at least one workspace."
+                continue
+            }
+
+            foreach ($workspace in $workspacesResponse.value) {
+                if ($selectedWorkspaceIds -notcontains $workspace.id) { continue }
+                $workspacesInfo += Rename-Properties -object $workspace -renameMap $workspaceRenameMap
+            }
+
+            # Flag for later "My Workspace" section
+            $IncludeMyWorkspace = $selection.IncludeMyWorkspace
+            $workspaceSelectionDone = $true
+        }
+
+        if ($reportPickerCancelled) { continue }
+    }
+    } # end while (reportPickerCancelled)
 
 
+}
 # Initialize collections for all necessary information
 $fabricItemsInfo = @()
 $datasetsInfo = @()
@@ -1383,7 +1705,7 @@ Write-Output "Workspace [$($workspace.WorkspaceName)] Report & Model metadata ex
     $datasetsUrl = "$($global:PowerBIEndpoints.ApiPrefix)/v1.0/myorg/groups/$($workspace.WorkspaceId)/datasets"
     $datasets = Invoke-PowerBIRestMethod -Method GET -Url $datasetsUrl | ConvertFrom-Json
 
-    foreach ($dataset in $datasets.value) {
+    foreach ($dataset in (Get-ObjectValueCollection -InputObject $datasets)) {
         $renamedDataset = Rename-Properties -object $dataset -renameMap $datasetRenameMap
         $renamedDataset | Add-Member -NotePropertyName "WorkspaceId" -NotePropertyValue $workspace.WorkspaceId -Force
         $renamedDataset | Add-Member -NotePropertyName "WorkspaceName" -NotePropertyValue $workspace.WorkspaceName -Force
@@ -1396,14 +1718,15 @@ Write-Output "Workspace [$($workspace.WorkspaceName)] Report & Model metadata ex
         $datasourcesUrl = "$($global:PowerBIEndpoints.ApiPrefix)/v1.0/myorg/groups/$($workspace.WorkspaceId)/datasets/$($dataset.id)/datasources"
         $datasources = Invoke-PowerBIRestMethod -Method GET -Url $datasourcesUrl | ConvertFrom-Json
 
-        foreach ($datasource in $datasources.value) {
+        foreach ($datasource in (Get-ObjectValueCollection -InputObject $datasources)) {
             $renamedDatasource = Rename-Properties -object $datasource -renameMap $datasetDatasourceRenameMap
             $renamedDatasource | Add-Member -NotePropertyName "WorkspaceId" -NotePropertyValue $workspace.WorkspaceId -Force
             $renamedDatasource | Add-Member -NotePropertyName "WorkspaceName" -NotePropertyValue $workspace.WorkspaceName -Force
             $renamedDatasource | Add-Member -NotePropertyName "DatasetId" -NotePropertyValue $dataset.id -Force
             $renamedDatasource | Add-Member -NotePropertyName "DatasetName" -NotePropertyValue $dataset.name -Force
-            if ($datasource.connectionDetails) {
-                $renamedDatasource.DatasetDatasourceConnectionDetails = $datasource.connectionDetails | ConvertTo-Json -Compress
+            $connectionDetails = Get-ObjectPropertyValue -InputObject $datasource -Name 'connectionDetails'
+            if ($connectionDetails) {
+                $renamedDatasource.DatasetDatasourceConnectionDetails = $connectionDetails | ConvertTo-Json -Compress
             }
             $datasetSourcesInfo += $renamedDatasource
         }
@@ -1413,17 +1736,20 @@ Write-Output "Workspace [$($workspace.WorkspaceName)] Report & Model metadata ex
     $reportsUrl = "$($global:PowerBIEndpoints.ApiPrefix)/v1.0/myorg/groups/$($workspace.WorkspaceId)/reports"
     $reports = Invoke-PowerBIRestMethod -Method GET -Url $reportsUrl | ConvertFrom-Json
 
-	# Create a hash set to store Report IDs
-	$reportIds = @{}
+	# Create a hash set to store captured workspace Report IDs.
+	# Do not call this $ReportIds/$reportIds: PowerShell variable names are
+	# case-insensitive, so that collides with the [string[]] -ReportIds
+	# script parameter used by scheduled Reports mode.
+	$capturedWorkspaceReportIds = @{}
 
-    foreach ($report in $reports.value) {
+    foreach ($report in (Get-ObjectValueCollection -InputObject $reports)) {
         $renamedReport = Rename-Properties -object $report -renameMap $reportRenameMap
         $renamedReport | Add-Member -NotePropertyName "WorkspaceId" -NotePropertyValue $workspace.WorkspaceId -Force
         $renamedReport | Add-Member -NotePropertyName "WorkspaceName" -NotePropertyValue $workspace.WorkspaceName -Force
 
 
         # Retrieve and add the correct DatasetName from the lookup table if DatasetId exists
-        $datasetId = $report.datasetId
+        $datasetId = Get-ObjectPropertyValue -InputObject $report -Name 'datasetId'
         if ($datasetId -and $datasetNameLookup.ContainsKey($datasetId)) {
             $renamedReport | Add-Member -NotePropertyName "DatasetName" -NotePropertyValue $datasetNameLookup[$datasetId] -Force
         } else {
@@ -1435,7 +1761,7 @@ Write-Output "Workspace [$($workspace.WorkspaceName)] Report & Model metadata ex
         # Fetch report pages
         $pagesUrl = "$($global:PowerBIEndpoints.ApiPrefix)/v1.0/myorg/groups/$($workspace.WorkspaceId)/reports/$($report.id)/pages"
         $pages = Invoke-PowerBIRestMethod -Method GET -Url $pagesUrl | ConvertFrom-Json
-        foreach ($page in $pages.value) {
+        foreach ($page in (Get-ObjectValueCollection -InputObject $pages)) {
             $renamedPage = Rename-Properties -object $page -renameMap $pageRenameMap
             $renamedPage | Add-Member -NotePropertyName "WorkspaceId" -NotePropertyValue $workspace.WorkspaceId -Force
             $renamedPage | Add-Member -NotePropertyName "WorkspaceName" -NotePropertyValue $workspace.WorkspaceName -Force
@@ -1444,7 +1770,7 @@ Write-Output "Workspace [$($workspace.WorkspaceName)] Report & Model metadata ex
             $reportPagesInfo += $renamedPage
 
             # Store the report ID in the hash set
-            $reportIds[$report.id] = $true
+            $capturedWorkspaceReportIds[$report.id] = $true
         }
     }
 Write-Output "Workspace [$($workspace.WorkspaceName)] Report & Model metadata extraction process completed."
@@ -1468,8 +1794,9 @@ $apps = Invoke-PowerBIRestMethod -Method GET -Url $appsUrl | ConvertFrom-Json
 $appReportIds = @{}
 $originalReportObjectIds = @{}
 
-foreach ($app in $apps.value) {
-    if ($workspacesInfo.WorkspaceId -contains $app.workspaceId) {
+foreach ($app in (Get-ObjectValueCollection -InputObject $apps)) {
+    $appWorkspaceId = Get-ObjectPropertyValue -InputObject $app -Name 'workspaceId'
+    if ($appWorkspaceId -and ($workspacesInfo.WorkspaceId -contains $appWorkspaceId)) {
         $renamedApp = Rename-Properties -object $app -renameMap $appRenameMap
         $appsInfo += $renamedApp
 
@@ -1477,7 +1804,7 @@ foreach ($app in $apps.value) {
         $appReportsUrl = "$($global:PowerBIEndpoints.ApiPrefix)/v1.0/myorg/apps/$($app.id)/reports"
         $appReports = Invoke-PowerBIRestMethod -Method GET -Url $appReportsUrl | ConvertFrom-Json
 
-        foreach ($report in $appReports.value) {
+        foreach ($report in (Get-ObjectValueCollection -InputObject $appReports)) {
             $renamedAppReport = Rename-Properties -object $report -renameMap $appReportRenameMap
             $renamedAppReport | Add-Member -NotePropertyName "AppId" -NotePropertyValue $app.id -Force
             $renamedAppReport | Add-Member -NotePropertyName "AppName" -NotePropertyValue $app.name -Force
@@ -1485,7 +1812,10 @@ foreach ($app in $apps.value) {
 
             # Store the app report ID in the hash set
             $appReportIds[$report.id] = $true
-            $originalReportObjectIds[$report.originalReportObjectId] = $true
+            $originalReportObjectId = Get-ObjectPropertyValue -InputObject $report -Name 'originalReportObjectId'
+            if ($originalReportObjectId) {
+                $originalReportObjectIds[$originalReportObjectId] = $true
+            }
         }
     }
 }
@@ -1499,7 +1829,7 @@ Write-Output "Workspace [$($workspace.WorkspaceName)] Model Refresh History extr
         $refreshHistoryUrl = "$($global:PowerBIEndpoints.ApiPrefix)/v1.0/myorg/groups/$($workspace.WorkspaceId)/datasets/$($dataset.DatasetId)/refreshes"
         $refreshHistoryResponse = Invoke-PowerBIRestMethod -Method GET -Url $refreshHistoryUrl | ConvertFrom-Json
 
-        foreach ($refresh in $refreshHistoryResponse.value) {
+        foreach ($refresh in (Get-ObjectValueCollection -InputObject $refreshHistoryResponse)) {
             $renamedRefreshRecord = Rename-Properties -object $refresh -renameMap $datasetRefreshRenameMap
             $renamedRefreshRecord | Add-Member -NotePropertyName "WorkspaceId" -NotePropertyValue $workspace.WorkspaceId -Force
             $renamedRefreshRecord | Add-Member -NotePropertyName "WorkspaceName" -NotePropertyValue $workspace.WorkspaceName -Force
@@ -1528,8 +1858,10 @@ Write-Output "Workspace [$($workspace.WorkspaceName)] Model Refresh Schedule ext
             $renamedScheduleRecord = Rename-Properties -object $refreshScheduleResponse -renameMap $datasetRefreshScheduleRenameMap
             
             # Create separate rows for each day-time combination
-            $days = if ($refreshScheduleResponse.days) { $refreshScheduleResponse.days } else { @($null) }
-            $times = if ($refreshScheduleResponse.times) { $refreshScheduleResponse.times } else { @($null) }
+            $scheduleDays = Get-ObjectPropertyValue -InputObject $refreshScheduleResponse -Name 'days'
+            $scheduleTimes = Get-ObjectPropertyValue -InputObject $refreshScheduleResponse -Name 'times'
+            $days = if ($scheduleDays) { $scheduleDays } else { @($null) }
+            $times = if ($scheduleTimes) { $scheduleTimes } else { @($null) }
             
             foreach ($day in $days) {
                 foreach ($time in $times) {
@@ -1563,8 +1895,8 @@ Write-Output "Workspace [$($workspace.WorkspaceName)] Dataflow metadata extracti
     $dataflowsResponse = Invoke-PowerBIRestMethod -Method GET -Url $dataflowsUrl | ConvertFrom-Json
 
     # Ensure response is not null before looping
-    if ($dataflowsResponse.value) {
-        foreach ($dataflow in $dataflowsResponse.value) {
+    if ((Get-ObjectValueCollection -InputObject $dataflowsResponse)) {
+        foreach ($dataflow in (Get-ObjectValueCollection -InputObject $dataflowsResponse)) {
             $renamedDataflow = Rename-Properties -object $dataflow -renameMap $dataflowRenameMap
             $renamedDataflow | Add-Member -NotePropertyName "WorkspaceId" -NotePropertyValue $workspace.WorkspaceId -Force
             $renamedDataflow | Add-Member -NotePropertyName "WorkspaceName" -NotePropertyValue $workspace.WorkspaceName -Force
@@ -1581,8 +1913,8 @@ Write-Output "Workspace [$($workspace.WorkspaceName)] Dataflow metadata extracti
             $dataflowSourcesResponse = Invoke-PowerBIRestMethod -Method GET -Url $dataflowSourcesUrl | ConvertFrom-Json
 
             # Ensure response is not null before looping
-            if ($dataflowSourcesResponse.value) {
-                foreach ($datasource in $dataflowSourcesResponse.value) {
+            if ((Get-ObjectValueCollection -InputObject $dataflowSourcesResponse)) {
+                foreach ($datasource in (Get-ObjectValueCollection -InputObject $dataflowSourcesResponse)) {
                     $renamedDataflowDatasource = Rename-Properties -object $datasource -renameMap $dataflowDatasourceRenameMap
 
                     # Ensure required fields are included
@@ -1590,9 +1922,10 @@ Write-Output "Workspace [$($workspace.WorkspaceName)] Dataflow metadata extracti
                     $renamedDataflowDatasource | Add-Member -NotePropertyName "WorkspaceName" -NotePropertyValue $workspace.WorkspaceName -Force
                     $renamedDataflowDatasource | Add-Member -NotePropertyName "DataflowId" -NotePropertyValue $dataflow.objectId -Force
 
-            		if ($datasource.connectionDetails) {
-               		 $renamedDataflowDatasource.DataflowDatasourceConnectionDetails = $datasource.connectionDetails | ConvertTo-Json -Compress
-            }
+                    $connectionDetails = Get-ObjectPropertyValue -InputObject $datasource -Name 'connectionDetails'
+                    if ($connectionDetails) {
+                        $renamedDataflowDatasource.DataflowDatasourceConnectionDetails = $connectionDetails | ConvertTo-Json -Compress
+                    }
                     
 
                     if ($dataflowNameLookup.ContainsKey($dataflow.objectId)) {
@@ -1618,8 +1951,8 @@ Write-Output "Workspace [$($workspace.WorkspaceName)] Dataflow metadata extracti
         $fabricDataflowsResponse = Invoke-RestMethod -Uri $fabricDataflowsUrl -Headers $fabricHeaders -Method GET -ErrorAction Stop
 
         # Ensure response is not null before looping
-        if ($fabricDataflowsResponse.value) {
-            foreach ($fabricDataflow in $fabricDataflowsResponse.value) {
+        if ((Get-ObjectValueCollection -InputObject $fabricDataflowsResponse)) {
+            foreach ($fabricDataflow in (Get-ObjectValueCollection -InputObject $fabricDataflowsResponse)) {
                 # Map Fabric API response to match Power BI API structure using rename map
                 $renamedFabricDataflow = Rename-Properties -object $fabricDataflow -renameMap $fabricDataflowRenameMap
                 $renamedFabricDataflow | Add-Member -NotePropertyName "WorkspaceId" -NotePropertyValue $workspace.WorkspaceId -Force
@@ -1651,8 +1984,8 @@ foreach ($workspace in $workspacesInfo) {
         $dataflowLineageResponse = Invoke-PowerBIRestMethod -Method GET -Url $dataflowLineageUrl | ConvertFrom-Json
 
         # Ensure response is not null before looping
-        if ($dataflowLineageResponse.value) {
-            foreach ($dataflow in $dataflowLineageResponse.value) {
+        if ((Get-ObjectValueCollection -InputObject $dataflowLineageResponse)) {
+            foreach ($dataflow in (Get-ObjectValueCollection -InputObject $dataflowLineageResponse)) {
                 $renamedDataflow = Rename-Properties -object $dataflow -renameMap $dataflowLineageRenameMap
                 $renamedDataflow | Add-Member -NotePropertyName "WorkspaceId" -NotePropertyValue $workspace.WorkspaceId -Force
                 $renamedDataflow | Add-Member -NotePropertyName "WorkspaceName" -NotePropertyValue $workspace.WorkspaceName -Force
@@ -1685,8 +2018,8 @@ Write-Output "Workspace [$($workspace.WorkspaceName)] Dataflow Refresh History e
         $refreshHistoryResponse = Invoke-PowerBIRestMethod -Method GET -Url $refreshHistoryUrl | ConvertFrom-Json
 
         # Ensure response is not null before looping
-        if ($refreshHistoryResponse.value) {
-            foreach ($refresh in $refreshHistoryResponse.value) {
+        if ((Get-ObjectValueCollection -InputObject $refreshHistoryResponse)) {
+            foreach ($refresh in (Get-ObjectValueCollection -InputObject $refreshHistoryResponse)) {
                 $renamedRefreshRecord = Rename-Properties -object $refresh -renameMap $dataflowRefreshRenameMap
                 $renamedRefreshRecord | Add-Member -NotePropertyName "WorkspaceId" -NotePropertyValue $workspace.WorkspaceId -Force
                 $renamedRefreshRecord | Add-Member -NotePropertyName "WorkspaceName" -NotePropertyValue $workspace.WorkspaceName -Force
@@ -1720,7 +2053,7 @@ Write-Output "Workspace [$($workspace.WorkspaceName)] Fabric Item metadata extra
         $fabricItemsResponse = Invoke-PowerBIRestMethod -Method GET -Url $fabricItemsUrl | ConvertFrom-Json
 
 
-        $filteredItems = $fabricItemsResponse.value | Where-Object {
+        $filteredItems = (Get-ObjectValueCollection -InputObject $fabricItemsResponse) | Where-Object {
             $_.type -ne 'Report' -and $_.type -ne 'SemanticModel'
         }
 
@@ -1768,7 +2101,7 @@ if ($IncludeMyWorkspace -or ($selection -and $selection.TimedOut)) {
     # Fetch datasets from "My Workspace"
     $myWorkspaceDatasetsUrl = "$($global:PowerBIEndpoints.ApiPrefix)/v1.0/myorg/datasets"
     $myWorkspaceDatasets = Invoke-PowerBIRestMethod -Method GET -Url $myWorkspaceDatasetsUrl | ConvertFrom-Json
-    foreach ($dataset in $myWorkspaceDatasets.value) {
+    foreach ($dataset in (Get-ObjectValueCollection -InputObject $myWorkspaceDatasets)) {
         $renamedDataset = Rename-Properties -object $dataset -renameMap $datasetRenameMap
         $renamedDataset | Add-Member -NotePropertyName "WorkspaceId" -NotePropertyValue $myWorkspaceId -Force
         $renamedDataset | Add-Member -NotePropertyName "WorkspaceName" -NotePropertyValue $myWorkspaceName -Force
@@ -1777,14 +2110,15 @@ if ($IncludeMyWorkspace -or ($selection -and $selection.TimedOut)) {
 
         $datasourcesUrl = "$($global:PowerBIEndpoints.ApiPrefix)/v1.0/myorg/datasets/$($dataset.id)/datasources"
         $datasources = Invoke-PowerBIRestMethod -Method GET -Url $datasourcesUrl | ConvertFrom-Json
-        foreach ($datasource in $datasources.value) {
+        foreach ($datasource in (Get-ObjectValueCollection -InputObject $datasources)) {
             $renamedDatasource = Rename-Properties -object $datasource -renameMap $datasetDatasourceRenameMap
             $renamedDatasource | Add-Member -NotePropertyName "WorkspaceId" -NotePropertyValue $myWorkspaceId -Force
             $renamedDatasource | Add-Member -NotePropertyName "WorkspaceName" -NotePropertyValue $myWorkspaceName -Force
             $renamedDatasource | Add-Member -NotePropertyName "DatasetId" -NotePropertyValue $dataset.id -Force
             $renamedDatasource | Add-Member -NotePropertyName "DatasetName" -NotePropertyValue $dataset.name -Force
-            if ($datasource.connectionDetails) {
-                $renamedDatasource.DatasetDatasourceConnectionDetails = $datasource.connectionDetails | ConvertTo-Json -Compress
+            $connectionDetails = Get-ObjectPropertyValue -InputObject $datasource -Name 'connectionDetails'
+            if ($connectionDetails) {
+                $renamedDatasource.DatasetDatasourceConnectionDetails = $connectionDetails | ConvertTo-Json -Compress
             }
             $datasetSourcesInfo += $renamedDatasource
         }
@@ -1795,18 +2129,19 @@ if ($IncludeMyWorkspace -or ($selection -and $selection.TimedOut)) {
     $myWorkspaceReports = Invoke-PowerBIRestMethod -Method GET -Url $myWorkspaceReportsUrl | ConvertFrom-Json
 
     $sharedReportExists = $false
-    foreach ($report in $myWorkspaceReports.value) {
+    foreach ($report in (Get-ObjectValueCollection -InputObject $myWorkspaceReports)) {
         # Skip if already captured elsewhere (workspace/app)
-        if ($appReportIds.ContainsKey($report.id) -or $reportIds.ContainsKey($report.id) -or $originalReportObjectIds.ContainsKey($report.id)) {
+        if ($appReportIds.ContainsKey($report.id) -or $capturedWorkspaceReportIds.ContainsKey($report.id) -or $originalReportObjectIds.ContainsKey($report.id)) {
             continue
         }
         
         # Skip reports with appId - these are shared via apps, not actually in My Workspace
-        if ($report.appId) {
+        if (Get-ObjectPropertyValue -InputObject $report -Name 'appId') {
             continue
         }
 
-        if ($report.isOwnedByMe -eq $false) {
+        $isOwnedByMe = Get-ObjectPropertyValue -InputObject $report -Name 'isOwnedByMe' -Default $true
+        if ($isOwnedByMe -eq $false) {
             $workspaceIdValue = "Shared Reports (No Workspace Access)"
             $workspaceNameValue = "Shared Reports (No Workspace Access)"
             $sharedReportExists = $true
@@ -1819,7 +2154,7 @@ if ($IncludeMyWorkspace -or ($selection -and $selection.TimedOut)) {
         $renamedReport | Add-Member -NotePropertyName "WorkspaceId" -NotePropertyValue $workspaceIdValue -Force
         $renamedReport | Add-Member -NotePropertyName "WorkspaceName" -NotePropertyValue $workspaceNameValue -Force
 
-        $datasetId = $report.datasetId
+        $datasetId = Get-ObjectPropertyValue -InputObject $report -Name 'datasetId'
         if ($datasetId -and $datasetNameLookup.ContainsKey($datasetId)) {
             $renamedReport | Add-Member -NotePropertyName "DatasetName" -NotePropertyValue $datasetNameLookup[$datasetId] -Force
         } else {
@@ -1829,12 +2164,12 @@ if ($IncludeMyWorkspace -or ($selection -and $selection.TimedOut)) {
 
         $pagesUrl = "$($global:PowerBIEndpoints.ApiPrefix)/v1.0/myorg/reports/$($report.id)/pages"
         $pages = Invoke-PowerBIRestMethod -Method GET -Url $pagesUrl | ConvertFrom-Json
-        foreach ($page in $pages.value) {
+        foreach ($page in (Get-ObjectValueCollection -InputObject $pages)) {
             $renamedPage = Rename-Properties -object $page -renameMap $pageRenameMap
             $renamedPage | Add-Member -NotePropertyName "WorkspaceId" -NotePropertyValue $workspaceIdValue -Force
             $renamedPage | Add-Member -NotePropertyName "WorkspaceName" -NotePropertyValue $workspaceNameValue -Force
-            $renamedPage | Add-Member -NotePropertyValue "ReportId" -NotePropertyValue $report.id -Force
-            $renamedPage | Add-Member -NotePropertyValue "ReportName" -NotePropertyValue $report.name -Force
+            $renamedPage | Add-Member -NotePropertyName "ReportId" -NotePropertyValue $report.id -Force
+            $renamedPage | Add-Member -NotePropertyName "ReportName" -NotePropertyValue $report.name -Force
             $reportPagesInfo += $renamedPage
         }
     }
@@ -1854,7 +2189,7 @@ if ($IncludeMyWorkspace -or ($selection -and $selection.TimedOut)) {
     foreach ($dataset in $datasetsInfo | Where-Object { $_.WorkspaceId -eq $myWorkspaceId }) {
         $refreshHistoryUrl = "$($global:PowerBIEndpoints.ApiPrefix)/v1.0/myorg/datasets/$($dataset.DatasetId)/refreshes"
         $refreshHistoryResponse = Invoke-PowerBIRestMethod -Method GET -Url $refreshHistoryUrl | ConvertFrom-Json
-        foreach ($refresh in $refreshHistoryResponse.value) {
+        foreach ($refresh in (Get-ObjectValueCollection -InputObject $refreshHistoryResponse)) {
             $renamedRefreshRecord = Rename-Properties -object $refresh -renameMap $datasetRefreshRenameMap
             $renamedRefreshRecord | Add-Member -NotePropertyName "WorkspaceId" -NotePropertyValue $myWorkspaceId -Force
             $renamedRefreshRecord | Add-Member -NotePropertyName "WorkspaceName" -NotePropertyValue $myWorkspaceName -Force
@@ -1875,8 +2210,10 @@ if ($IncludeMyWorkspace -or ($selection -and $selection.TimedOut)) {
             $renamedScheduleRecord = Rename-Properties -object $refreshScheduleResponse -renameMap $datasetRefreshScheduleRenameMap
             
             # Create separate rows for each day-time combination
-            $days = if ($refreshScheduleResponse.days) { $refreshScheduleResponse.days } else { @($null) }
-            $times = if ($refreshScheduleResponse.times) { $refreshScheduleResponse.times } else { @($null) }
+            $scheduleDays = Get-ObjectPropertyValue -InputObject $refreshScheduleResponse -Name 'days'
+            $scheduleTimes = Get-ObjectPropertyValue -InputObject $refreshScheduleResponse -Name 'times'
+            $days = if ($scheduleDays) { $scheduleDays } else { @($null) }
+            $times = if ($scheduleTimes) { $scheduleTimes } else { @($null) }
             
             foreach ($day in $days) {
                 foreach ($time in $times) {
@@ -2287,8 +2624,14 @@ function Export-ReportDefinitionAsPbix {
 	        $cleanReportName = $cleanReportName -replace "[^a-zA-Z0-9\(\)&,.-]", " "
 	        $cleanReportName = $cleanReportName.TrimStart()
 	
-	        # Determine file extension
-	        $fileExtension = if ($report.WebUrl -like "*/rdlreports/*") { "rdl" } else { "pbix" }
+	        # Determine file extension. ReportsInfo contains renamed properties, so
+	        # prefer ReportWebUrl; fall back to WebUrl for compatibility with any
+	        # unrenamed report objects.
+	        $reportWebUrl = Get-ObjectPropertyValue -InputObject $report -Name 'ReportWebUrl'
+	        if (-not $reportWebUrl) {
+	            $reportWebUrl = Get-ObjectPropertyValue -InputObject $report -Name 'WebUrl'
+	        }
+	        $fileExtension = if ($reportWebUrl -like "*/rdlreports/*") { "rdl" } else { "pbix" }
 	        $filename = "$cleanWorkspaceName ~ $cleanReportName.$fileExtension"
 	        $filepath = Join-Path -Path $newDateFolder -ChildPath $filename
 	        $extractFolder = Join-Path -Path $tempExtractFolder -ChildPath "$cleanWorkspaceName ~ $cleanReportName"
@@ -2896,10 +3239,10 @@ foreach ($workspace in $workspacesInfo) {
     $dataflows = $dataflowsResponse | ConvertFrom-Json
 
     # Check if the response is valid and contains dataflows
-    if ($dataflows -and $dataflows.value) {
+    if ($dataflows -and (Get-ObjectValueCollection -InputObject $dataflows)) {
         
         # Iterate through the Gen1 dataflows
-        foreach ($dataflow in $dataflows.value) {
+        foreach ($dataflow in (Get-ObjectValueCollection -InputObject $dataflows)) {
             $dataflowId = $dataflow.objectId
             $dataflowName = $dataflow.name
 
@@ -3018,7 +3361,7 @@ foreach ($workspace in $workspacesInfo) {
         $fabricItemsResponse = Invoke-PowerBIRestMethod -Method GET -Url $fabricItemsUrl | ConvertFrom-Json
         
         # Filter for Dataflow items (Gen2 dataflows)
-        $gen2Dataflows = $fabricItemsResponse.value | Where-Object { $_.type -eq 'Dataflow' }
+        $gen2Dataflows = (Get-ObjectValueCollection -InputObject $fabricItemsResponse) | Where-Object { $_.type -eq 'Dataflow' }
         
         if ($gen2Dataflows -and $gen2Dataflows.Count -gt 0) {
             
@@ -3103,6 +3446,17 @@ Write-Output "Dataflow Backup and Detail Extraction Process Completed. Excel out
 
 
 Write-Output "All Excel files processed and combined successfully."
+
+if ($DeleteReportBackupsAfterExtraction) {
+    $reportBackupsPath = Join-Path -Path $baseFolderPath -ChildPath "Report Backups"
+    if (Test-Path -Path $reportBackupsPath) {
+        Write-Host "[INFO] Removing Report Backups to save disk space: $reportBackupsPath"
+        Remove-Item -Path $reportBackupsPath -Recurse -Force -ErrorAction SilentlyContinue
+    }
+    else {
+        Write-Host "[INFO] DeleteReportBackupsAfterExtraction requested, but no Report Backups folder was found."
+    }
+}
 
 $scriptEndTime = Get-Date
 $elapsedTime = New-TimeSpan -Start $scriptStartTime -End $scriptEndTime

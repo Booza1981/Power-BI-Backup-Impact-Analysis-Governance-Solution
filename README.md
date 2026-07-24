@@ -145,6 +145,77 @@ This automatically:
 > - “Always ignore Privacy Level settings”
 
 
+
+---
+
+## Scheduled / Custom Folder Setup
+
+This fork includes a scheduler-friendly runner so you do not have to use the default `C:\Power BI Backups` location.
+
+### Change where files are generated
+
+Put this repo wherever you want ImpactIQ to run from, or pass `-BaseFolderPath`:
+
+```powershell
+.\Run-ImpactIQ-Scheduled.ps1 -BaseFolderPath "D:\PowerBI\ImpactIQ"
+```
+
+The runner copies the required `Config` folder and `Power BI Governance Model.pbit` into the output folder, then runs the main script with `-BaseFolderPath` so all generated files land there.
+
+### Avoid keeping massive report backups
+
+Scheduled runs delete the `Report Backups` folder after report metadata has been extracted by default. To keep those backups for a particular run, add:
+
+```powershell
+-KeepReportBackups
+```
+
+The governance/detail Excel outputs are retained; only the bulky downloaded report backup files are removed.
+
+### Run without picker dialogs
+
+Workspace mode, all accessible workspaces:
+
+```powershell
+.\Run-ImpactIQ-Scheduled.ps1 -BaseFolderPath "D:\PowerBI\ImpactIQ"
+```
+
+Workspace mode, selected workspaces only:
+
+```powershell
+.\Run-ImpactIQ-Scheduled.ps1 `
+  -BaseFolderPath "D:\PowerBI\ImpactIQ" `
+  -WorkspaceIds @("workspace-guid-1", "workspace-guid-2")
+```
+
+Report mode, selected reports only:
+
+```powershell
+.\Run-ImpactIQ-Scheduled.ps1 `
+  -BaseFolderPath "D:\PowerBI\ImpactIQ" `
+  -RunMode Reports `
+  -ReportIds @("report-guid-1", "report-guid-2")
+```
+
+If a selected report uses a model in another workspace, the script includes that model workspace automatically where your permissions allow it.
+
+### Recommended Task Scheduler setup
+
+For normal governance refreshes, start with **daily out of hours**. If that proves too heavy, move to weekly; if you genuinely need fresher impact data, try every 6-12 hours after confirming runtime and API load are acceptable.
+
+Use Windows Task Scheduler:
+
+1. Create Task → **General** → choose your Windows user.
+2. Select **Run only when user is logged on**. This avoids service-principal/App Registration requirements and lets the existing Power BI user auth/cache work.
+3. Triggers → daily, e.g. early morning.
+4. Actions → Start a program:
+   - Program/script: `powershell.exe`
+   - Arguments: `-NoProfile -ExecutionPolicy Bypass -File "D:\PowerBI\ImpactIQ\Run-ImpactIQ-Scheduled.ps1"`
+   - Start in: `D:\PowerBI\ImpactIQ`
+5. Run it manually once from Task Scheduler and check `D:\PowerBI\ImpactIQ\Logs`.
+
+You can also point Task Scheduler at `Run-ImpactIQ-Scheduled.bat` if your organisation prefers batch-file actions.
+
 ---
 ## Features
   
